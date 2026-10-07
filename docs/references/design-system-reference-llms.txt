@@ -1,0 +1,1 @@
+Design system LLM reference placeholder. Add project-specific tokens, typography, spacing, color, and component usage rules here.

@@ -1,0 +1,1 @@
+Nixpacks LLM reference placeholder. Add deployment/runtime notes here if this project uses Nixpacks.
