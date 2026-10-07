@@ -1,0 +1,44 @@
+# Agent/harness local artifacts
+.agent-local/
+.agent-cache/
+.agent-runs/
+.agent-logs/
+*.local.md
+*.local.json
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.keystore
+*.jks
+secrets/
+
+# Generated temporary outputs
+/tmp/
+coverage/
+build/
+dist/
+.next/
+.dart_tool/
+.pytest_cache/
+node_modules/
+
+# Multi-agent harness runtime (board state tasks.json / issues.json stays committed)
+.harness/runs/
+.harness/chat/
+.harness/worktrees/
+.harness/agents.json
+.harness/loop.json
+.harness/loop.log
+.harness/activity.jsonl
+.harness/.lock
+.harness/STOP
+.harness/*.tmp
+.harness/jobs/
+.harness/limits.json
+.harness/asks/
+.harness/MOCK_LIMIT_*
+# docs/chat-logs/ holds chats you saved on purpose; commit them or add the folder here.
