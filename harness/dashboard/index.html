@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent console</title>
+<style>
+:root {
+  --bg: #e6ebef; --panel: #fbfcfd; --sunk: #f1f4f6; --ink: #13202a; --muted: #5a6a77; --faint: #8796a2; --line: #d3dbe1; --line-strong: #b9c5ce;
+  --rail: #11202b; --rail-2: #182b38; --rail-ink: #dbe5eb; --rail-muted: #8ea2b0; --rail-line: #24394a;
+  --todo: #6b7c8a; --run: #2462c8; --done: #1d8657; --pend: #b26f00; --limit: #c4412a;
+  --todo-bg: #edf0f3; --run-bg: #e6eefb; --done-bg: #e4f2ea; --pend-bg: #fbf1df; --limit-bg: #fbe9e5;
+  --focus: #2462c8; --radius: 8px;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e151b; --panel: #151e26; --sunk: #111920; --ink: #e2e9ee; --muted: #9aabb8; --faint: #6f8291; --line: #24323e; --line-strong: #344654;
+    --rail: #0a1015; --rail-2: #121c24; --rail-ink: #dbe5eb; --rail-muted: #84979f; --rail-line: #1d2b36;
+    --todo: #91a1ad; --run: #6b9cff; --done: #4fc58b; --pend: #e9a53b; --limit: #f2765c;
+    --todo-bg: #1a242d; --run-bg: #16233a; --done-bg: #132a20; --pend-bg: #2d2412; --limit-bg: #36191400;
+    --limit-bg: #351a14; color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); display: grid; grid-template-rows: 56px 1fr; overflow: hidden; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 1px solid var(--line-strong); background: var(--panel); border-radius: 6px; padding: 6px 12px; line-height: 1.3; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+button.go { background: var(--run); color: #fff; border-color: var(--run); }
+button.warn { background: var(--limit); color: #fff; border-color: var(--limit); }
+button.ghost { border-color: transparent; background: transparent; }
+button.ghost:hover:not(:disabled) { background: var(--sunk); border-color: var(--line); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+input, select, textarea { background: var(--panel); border: 1px solid var(--line-strong); border-radius: 6px; padding: 7px 9px; width: 100%; }
+select { padding-right: 26px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ---------- top bar ---------- */
+header { display: flex; align-items: center; gap: 14px; padding: 0 16px 0 18px; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 0; }
+header h1 { font-size: 16px; margin: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.loop { display: flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px; background: var(--sunk); color: var(--muted); font-size: 13px; min-width: 0; }
+.loop span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.loop.on { background: var(--run-bg); color: var(--run); }
+.loop.wait { background: var(--pend-bg); color: var(--pend); }
+.spacer { flex: 1; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--todo); flex: none; }
+.dot.running { background: var(--run); box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 25%, transparent); }
+.dot.idle { background: var(--done); } .dot.error { background: var(--limit); } .dot.limited { background: var(--limit); }
+.dot.disabled { background: transparent; border: 1.5px solid var(--faint); }
+.dot.stopping, .dot.waiting { background: var(--pend); }
+
+/* ---------- three panes ---------- */
+.app { display: grid; grid-template-columns: 270px minmax(0, 1fr) 370px; min-height: 0; }
+
+/* agent rail */
+#rail { background: var(--rail); color: var(--rail-ink); display: flex; flex-direction: column; min-height: 0; }
+#rail .head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 10px; }
+#rail h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--rail-muted); }
+#rail .head button { color: var(--rail-muted); border: 0; background: none; padding: 4px 6px; }
+#rail .head button:hover { color: var(--rail-ink); }
+#agents { overflow: auto; flex: 1; padding: 0 8px 12px; }
+.agent { display: block; width: 100%; text-align: left; border: 0; border-radius: 8px; background: transparent; color: inherit; padding: 10px 10px 10px 12px; margin-bottom: 2px; position: relative; }
+.agent:hover { background: var(--rail-2); }
+.agent.running { background: var(--rail-2); }
+.agent.running::before, .agent.limited::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: var(--run); }
+.agent.limited::before { background: var(--limit); }
+.agent .l1 { display: flex; align-items: center; gap: 8px; }
+.agent .name { font-weight: 650; }
+.agent .rt { margin-left: auto; font-size: 12px; color: var(--rail-muted); border: 1px solid var(--rail-line); padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.agent.limited .rt { color: #ffb3a3; border-color: #7a3527; }
+.agent .l2 { font-size: 12px; color: var(--rail-muted); margin-top: 2px; padding-left: 16px; }
+.agent .l3 { font-size: 12px; color: var(--rail-ink); opacity: .85; margin-top: 3px; padding-left: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent .l3 b { color: #9cc0ff; font-weight: 600; }
+.agent .warnline { font-size: 12px; color: #ffb3a3; margin-top: 4px; padding-left: 16px; }
+.agent.disabled { opacity: .5; }
+@keyframes pulse { 50% { opacity: .35; } }
+.agent.running .dot { animation: pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .agent.running .dot { animation: none; } }
+
+/* center */
+#center { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#attention { display: grid; gap: 8px; padding: 12px 18px 0; }
+#attention:empty { display: none; }
+.alert { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; border-radius: var(--radius); border: 1px solid; flex-wrap: wrap; }
+.alert.limit { background: var(--limit-bg); border-color: color-mix(in srgb, var(--limit) 35%, transparent); }
+.alert.pend { background: var(--pend-bg); border-color: color-mix(in srgb, var(--pend) 35%, transparent); }
+.alert .msg { flex: 1; min-width: 220px; }
+.alert .msg b { font-weight: 650; display: block; }
+.alert .msg small { display: block; color: var(--muted); font-size: 12px; }
+.alert .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.toolbar { display: flex; align-items: center; gap: 4px; padding: 12px 18px 0; }
+.tab { border: 0; background: none; padding: 7px 12px; border-radius: 6px; color: var(--muted); font-weight: 500; }
+.tab:hover { background: var(--panel); }
+.tab[aria-selected="true"] { color: var(--ink); background: var(--panel); box-shadow: 0 0 0 1px var(--line); }
+.tab .count { margin-left: 6px; font-size: 12px; color: var(--faint); }
+.filter { width: 180px; padding: 6px 9px; margin-right: 6px; }
+
+.board { display: grid; grid-template-columns: repeat(4, minmax(168px, 1fr)); gap: 12px; padding: 12px 18px 18px; overflow: auto; flex: 1; min-height: 0; align-items: start; }
+.col { background: var(--sunk); border: 1px solid var(--line); border-radius: 10px; min-height: 140px; display: flex; flex-direction: column; }
+.col.drop { border-color: var(--focus); border-style: dashed; }
+.col h3 { margin: 0; padding: 10px 12px; font-size: 13px; font-weight: 650; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+.col h3 i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.col h3 span { color: var(--faint); font-weight: 500; }
+.col[data-status="todo"] h3 i { background: var(--todo); }
+.col[data-status="in-progress"] h3 i { background: var(--run); }
+.col[data-status="done"] h3 i { background: var(--done); }
+.col[data-status="pending"] h3 i { background: var(--pend); }
+.col .list { padding: 8px; display: grid; gap: 8px; }
+.col .empty { color: var(--faint); font-size: 13px; padding: 6px 4px 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px 10px; cursor: pointer; position: relative; }
+.card:hover { border-color: var(--line-strong); }
+.card[data-status="in-progress"] { border-left: 3px solid var(--run); }
+.card[data-status="pending"] { border-left: 3px solid var(--pend); }
+.card[data-status="done"] .title { color: var(--muted); }
+.card .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--muted); }
+.card .id { font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.card .title { margin-top: 3px; font-weight: 500; overflow-wrap: anywhere; }
+.card .who { font-size: 12px; color: var(--run); margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+.card .why { font-size: 12px; color: var(--pend); margin-top: 6px; overflow-wrap: anywhere; }
+.card .after { font-size: 12px; color: var(--faint); margin-top: 4px; }
+.card .acts { display: flex; gap: 6px; margin-top: 8px; }
+.card .acts button { padding: 3px 10px; font-size: 12px; }
+.prio-P0 { color: var(--limit) !important; font-weight: 700; } .prio-P1 { color: var(--pend) !important; font-weight: 600; }
+.sev-critical, .sev-high { color: var(--limit) !important; font-weight: 600; }
+.spin { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: rot 0.9s linear infinite; display: inline-block; }
+@keyframes rot { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+#activity { padding: 12px 18px 18px; overflow: auto; flex: 1; }
+#activity .row { display: grid; grid-template-columns: 64px 130px 1fr; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--line); font-size: 13px; }
+#activity time, #activity .by { color: var(--muted); }
+
+/* chat */
+#chat { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+#chat .head { padding: 12px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+#chat .row { display: flex; gap: 8px; align-items: center; }
+#chat .row > select { flex: 1; min-width: 0; }
+#chat .row label { font-size: 12px; color: var(--muted); width: 54px; flex: none; }
+#chat .row button { flex: none; padding: 6px 10px; }
+#chatwarn { font-size: 12px; color: var(--limit); }
+#chatwarn:empty { display: none; }
+#msgs { flex: 1; overflow: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 12px; background: var(--sunk); }
+.msg { max-width: 90%; padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.human { align-self: flex-end; background: var(--ink); color: var(--panel); border-bottom-right-radius: 4px; }
+.msg.agent { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.msg.agent.fail { background: var(--limit-bg); border-color: color-mix(in srgb, var(--limit) 35%, transparent); }
+.msg .by { display: block; font-size: 11px; color: var(--faint); margin-bottom: 3px; }
+.trace { align-self: flex-start; font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; max-width: 100%; }
+.trace span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+.chatempty { color: var(--muted); font-size: 13px; text-align: center; margin: auto 10px; }
+#chatform { display: flex; gap: 8px; padding: 10px 14px 14px; border-top: 1px solid var(--line); align-items: flex-end; }
+#chatform textarea { resize: none; height: 66px; }
+
+/* dialogs */
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); padding: 0; width: min(640px, 94vw); max-height: 88vh; }
+dialog::backdrop { background: rgba(8, 14, 20, .5); }
+dialog .body { padding: 20px 22px; display: grid; gap: 14px; }
+dialog h3 { margin: 0; font-size: 17px; }
+dialog .sub { color: var(--muted); font-size: 13px; margin-top: -8px; }
+dialog section h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; }
+dialog .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+dialog .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+dialog label.f { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+dialog .actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding-top: 4px; }
+dialog .actions .left { margin-right: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.rtpick { display: grid; gap: 8px; }
+.rtopt { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: center; text-align: left; padding: 10px 12px; border-radius: 8px; }
+.rtopt[aria-pressed="true"] { border-color: var(--run); background: var(--run-bg); box-shadow: inset 0 0 0 1px var(--run); }
+.rtopt .radio { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--line-strong); }
+.rtopt[aria-pressed="true"] .radio { border: 5px solid var(--run); }
+.rtopt b { display: block; font-weight: 600; }
+.rtopt small { color: var(--muted); font-size: 12px; }
+.tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--sunk); color: var(--muted); white-space: nowrap; }
+.tag.bad { background: var(--limit-bg); color: var(--limit); }
+.tag.ok { background: var(--done-bg); color: var(--done); }
+.check { display: flex; gap: 8px; align-items: center; font-size: 14px; color: var(--ink); }
+.check input { width: auto; }
+#log, .feedback { font-family: var(--mono); font-size: 12px; max-height: 280px; overflow: auto; white-space: pre-wrap; background: var(--sunk); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+#log .tool { color: var(--run); } #log .error, #log .stderr, #log .limit { color: var(--limit); } #log .result { color: var(--done); } #log .start, #log .end { color: var(--faint); }
+.notes { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+.notes div { padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+.notes div:last-child { border-bottom: 0; }
+.notes b { font-weight: 600; } .notes time { color: var(--faint); font-size: 12px; }
+.kv { display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.kv b { color: var(--ink); font-weight: 600; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--panel); padding: 9px 16px; border-radius: 8px; display: none; z-index: 10; max-width: 90vw; }
+.toast button { margin-left: 10px; background: transparent; color: inherit; border-color: currentColor; padding: 2px 8px; }
+
+@media (max-width: 1500px) { .app { grid-template-columns: 240px minmax(0, 1fr) 340px; } }
+@media (min-width: 1700px) { .app { grid-template-columns: 290px minmax(0, 1fr) 400px; } }
+@media (max-width: 1180px) {
+  body { display: block; overflow: auto; }
+  header { flex-wrap: wrap; padding: 10px 14px; position: sticky; top: 0; z-index: 2; }
+  .app { display: block; }
+  #rail, #center, #chat { min-height: 0; }
+  #agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px; overflow: visible; }
+  .board { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
+  #activity { overflow: visible; }
+  #chat { border-left: 0; border-top: 1px solid var(--line); height: 620px; }
+}
+@media (max-width: 560px) { .board { grid-template-columns: 1fr; } .filter { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="project">Agent console</h1>
+  <div class="loop" id="loop"><span class="dot" id="loopdot"></span><span id="looptext">Loop stopped</span></div>
+  <div class="spacer"></div>
+  <button id="startloop" class="go">▶ Start loop</button>
+  <button id="stoploop">■ Stop loop</button>
+  <button id="stopnow" class="warn" hidden>Stop now</button>
+  <button id="opensettings" class="ghost" aria-label="Settings">⚙ Settings</button>
+</header>
+
+<div class="app">
+  <aside id="rail" aria-label="Agents">
+    <div class="head"><h2>Agents</h2><button id="railsettings" title="Runtime for all agents">Runtimes…</button></div>
+    <div id="agents"></div>
+  </aside>
+
+  <section id="center">
+    <div id="attention" aria-live="polite"></div>
+    <div class="toolbar" role="tablist">
+      <button class="tab" role="tab" data-tab="tasks" aria-selected="true">Tasks<span class="count" id="ctasks"></span></button>
+      <button class="tab" role="tab" data-tab="issues" aria-selected="false">Issues<span class="count" id="cissues"></span></button>
+      <button class="tab" role="tab" data-tab="activity" aria-selected="false">Activity</button>
+      <div class="spacer"></div>
+      <input class="filter" id="filter" placeholder="Filter…" aria-label="Filter cards">
+      <button id="newitem" class="primary">New task</button>
+    </div>
+    <div class="board" id="board"></div>
+    <div id="activity" hidden></div>
+  </section>
+
+  <aside id="chat" aria-label="Chat">
+    <div class="head">
+      <div class="row"><label for="chatagent">Agent</label><select id="chatagent"></select></div>
+      <div class="row"><label for="chatruntime">Runs on</label><select id="chatruntime"></select></div>
+      <div class="row"><label for="chatlist">Chat</label><select id="chatlist"></select>
+        <button id="newchat" title="Start a new conversation">New</button>
+        <button id="savechat" title="Save this conversation to docs/chat-logs">Save</button></div>
+      <div id="chatwarn"></div>
+    </div>
+    <div id="msgs" aria-live="polite"></div>
+    <form id="chatform">
+      <textarea id="chatinput" placeholder="Ask for status, give an instruction, or describe work to plan…" aria-label="Message"></textarea>
+      <button class="primary" type="submit" id="send">Send</button>
+      <button type="button" id="stopreply" class="warn" hidden>Stop</button>
+    </form>
+  </aside>
+</div>
+
+<!-- new task / issue -->
+<dialog id="newdlg">
+  <form method="dialog" id="newform" class="body">
+    <h3 id="newtitle">New task</h3>
+    <label class="f">Title<input name="title" required></label>
+    <label class="f">Description<textarea name="description" rows="4"></textarea></label>
+    <div class="grid3" id="taskfields">
+      <label class="f">Role<select name="role"></select></label>
+      <label class="f">Priority<select name="priority"><option>P0</option><option>P1</option><option selected>P2</option><option>P3</option></select></label>
+      <label class="f">Depends on<input name="depends_on" placeholder="T-001, T-002"></label>
+    </div>
+    <label class="f" id="acceptfield">Acceptance criteria (one per line)<textarea name="acceptance" rows="3"></textarea></label>
+    <div class="grid3" id="issuefields" hidden>
+      <label class="f">Type<select name="type"><option>bug</option><option>question</option><option>risk</option><option>blocker</option></select></label>
+      <label class="f">Severity<select name="severity"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label>
+      <label class="f">Related task<input name="task" placeholder="T-001"></label>
+    </div>
+    <div class="actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok" id="newsubmit">Create task</button></div>
+  </form>
+</dialog>
+
+<dialog id="detail"><div class="body" id="detailbody"></div></dialog>
+<dialog id="agentdlg"><div class="body" id="agentbody"></div></dialog>
+<dialog id="settingsdlg"><div class="body" id="settingsbody"></div></dialog>
+<dialog id="limitdlg"><div class="body" id="limitbody"></div></dialog>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+const STATUSES = ['todo', 'in-progress', 'done', 'pending'];
+const LABEL = { 'todo': 'Todo', 'in-progress': 'In progress', 'done': 'Done', 'pending': 'Pending' };
+let S = { tasks: [], issues: [], agents: [], runtimes: [], activity: [], roles: [], loop: {}, jobs: {}, limits: {}, settings: {} };
+let tab = 'tasks';
+let filterText = '';
+let C = { agent: null, data: null };
+let openAgent = null;
+const promptedLimits = new Set();
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ago = (iso) => { if (!iso) return ''; const s = Math.max(0, (Date.now() - new Date(iso)) / 1000); return s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`; };
+const hhmm = (iso) => iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+const rtLabel = (name) => S.runtimes.find((r) => r.name === name)?.label || name;
+const limitText = (l) => l?.resets_at ? `resets ${hhmm(l.resets_at)}` : 'until you clear it';
+function toast(text, action) {
+  const el = $('#toast');
+  el.innerHTML = esc(text) + (action ? ` <button>${esc(action.label)}</button>` : '');
+  if (action) el.querySelector('button').onclick = action.run;
+  el.style.display = 'block';
+  clearTimeout(toast.t); toast.t = setTimeout(() => (el.style.display = 'none'), action ? 8000 : 3500);
+}
+async function api(method, url, data) {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(j.error || `Request failed (${r.status})`); throw new Error(j.error); }
+  return j;
+}
+const loopRunning = () => S.loop.status === 'running' || S.loop.status === 'stopping';
+const taskRunning = (t) => t.status === 'in-progress' || S.jobs[t.id]?.alive;
+
+// ================= header =================
+function renderHeader() {
+  $('#project').textContent = S.project || 'Agent console';
+  document.title = `${S.project || 'Agent console'} · agents`;
+  const l = S.loop || {};
+  const jobs = Object.values(S.jobs).filter((j) => j.alive);
+  const box = $('#loop');
+  box.className = 'loop' + (l.status === 'running' ? (l.reason ? ' wait' : ' on') : l.status === 'stopping' ? ' wait' : jobs.length ? ' on' : '');
+  $('#loopdot').className = `dot ${l.status === 'running' ? (l.reason ? 'waiting' : 'running') : l.status === 'stopping' ? 'stopping' : jobs.length ? 'running' : ''}`;
+  let text;
+  if (l.status === 'running') text = l.reason ? `Loop waiting — ${l.reason}` : `Loop running · ${l.iterations || 0} dispatched${l.active?.length ? ` · ${l.active.join(', ')}` : ''}`;
+  else if (l.status === 'stopping') text = 'Loop stopping after the current turns';
+  else text = `Loop stopped${l.reason ? ` — ${l.reason}` : ''}`;
+  if (jobs.length) text += ` · single run: ${jobs.map((j) => j.task).join(', ')}`;
+  $('#looptext').textContent = text;
+  $('#loop').title = text;
+  $('#startloop').disabled = loopRunning();
+  $('#stoploop').hidden = l.status === 'stopping';
+  $('#stoploop').disabled = l.status !== 'running';
+  $('#stopnow').hidden = l.status !== 'stopping';
+}
+$('#startloop').onclick = async () => { await api('POST', '/api/loop/start'); toast('Loop started'); };
+$('#stoploop').onclick = async () => { await api('POST', '/api/loop/stop'); toast('The loop will stop when the current agent turns finish'); };
+$('#stopnow').onclick = async () => { await api('POST', '/api/loop/stop', { force: true }); toast('Stopping running agents now'); };
+
+// ================= agent rail =================
+function renderRail() {
+  $('#agents').innerHTML = S.agents.map((a) => {
+    const cls = a.limited ? 'limited' : a.status;
+    const line = a.limited ? '' : a.status === 'running' ? `<b>${esc(a.current_task || (a.asked_by ? `for ${a.asked_by}` : ''))}</b> ${esc(a.last_message || 'working')}`
+      : a.status === 'disabled' ? 'disabled' : esc(a.last_message ? `last: ${a.last_message}` : 'idle');
+    return `<button class="agent ${esc(cls)}" data-agent="${esc(a.id)}" aria-label="${esc(a.id)} settings and activity">
+      <div class="l1"><span class="dot ${esc(cls)}"></span><span class="name">${esc(a.id)}</span><span class="rt">${a.limited ? '⚠ ' : ''}${esc(rtLabel(a.runtime))}</span></div>
+      <div class="l2">${esc(a.role)}${a.model ? ` · ${esc(a.model)}` : ''}${a.last_activity ? ` · ${ago(a.last_activity)} ago` : ''}</div>
+      ${line ? `<div class="l3">${line}</div>` : ''}
+      ${a.limited ? `<div class="warnline">Paused by usage limit · ${esc(limitText(a.limited))}</div>` : ''}
+    </button>`;
+  }).join('');
+}
+$('#agents').addEventListener('click', (e) => { const b = e.target.closest('.agent'); if (b) openAgentDialog(b.dataset.agent); });
+
+// ================= attention strip =================
+function renderAttention() {
+  const parts = [];
+  for (const r of S.runtimes.filter((x) => x.limited)) {
+    const affected = S.agents.filter((a) => a.runtime === r.name && a.enabled);
+    const alt = S.runtimes.filter((x) => x.name !== r.name && x.installed && !x.limited && x.name !== 'mock');
+    parts.push(`<div class="alert limit"><div class="msg"><b>⚠ ${esc(r.label)} hit its usage limit · ${esc(limitText(r.limited))}</b>${affected.length ? `${affected.length} agent${affected.length > 1 ? 's are' : ' is'} paused: ${esc(affected.map((a) => a.id).join(', '))}` : 'No enabled agent uses it right now'}<small>${esc(r.limited.message || '')}</small></div>
+      <div class="acts">${alt.map((x) => `<button class="warn" data-switch="${esc(r.name)}" data-to="${esc(x.name)}">Switch to ${esc(x.label)}</button>`).join('')}
+      <button data-clear="${esc(r.name)}">Mark available</button></div></div>`);
+  }
+  const pend = S.tasks.filter((t) => t.status === 'pending');
+  if (pend.length) {
+    parts.push(`<div class="alert pend"><div class="msg"><b>${pend.length} task${pend.length > 1 ? 's' : ''} need${pend.length > 1 ? '' : 's'} you</b>${pend.slice(0, 3).map((t) => `${esc(t.id)} ${esc(t.pending_reason || t.title)}`).join(' · ')}${pend.length > 3 ? ' …' : ''}</div>
+      <div class="acts">${pend.length === 1 ? `<button data-open="${esc(pend[0].id)}">Open ${esc(pend[0].id)}</button><button class="go" data-retry="${esc(pend[0].id)}">↻ Retry</button>` : `<button data-retryall="1" class="go">↻ Retry all</button>`}</div></div>`);
+  }
+  $('#attention').innerHTML = parts.join('');
+}
+$('#attention').addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.switch) return switchRuntime(b.dataset.switch, b.dataset.to);
+  if (b.dataset.clear) { await api('POST', `/api/runtimes/${b.dataset.clear}/clear-limit`); toast(`${rtLabel(b.dataset.clear)} marked available`); }
+  if (b.dataset.open) openDetail(b.dataset.open);
+  if (b.dataset.retry) retryTask(b.dataset.retry);
+  if (b.dataset.retryall) for (const t of S.tasks.filter((x) => x.status === 'pending')) await retryTask(t.id, true);
+});
+async function switchRuntime(from, to, ids) {
+  const r = await api('POST', '/api/runtimes/switch', { from, to, agents: ids });
+  toast(`${r.switched.length} agent${r.switched.length === 1 ? '' : 's'} now run on ${rtLabel(to)}`);
+}
+
+// Ask once per new limit whether to switch the affected agents.
+function promptLimits() {
+  for (const r of S.runtimes) {
+    const key = r.limited ? `${r.name}@${r.limited.at}` : null;
+    if (!key || promptedLimits.has(key)) continue;
+    promptedLimits.add(key);
+    if (document.querySelector('dialog[open]')) continue;
+    const affected = S.agents.filter((a) => a.runtime === r.name && a.enabled);
+    if (!affected.length) continue;
+    const alt = S.runtimes.filter((x) => x.name !== r.name && !x.limited);
+    $('#limitbody').innerHTML = `<h3>${esc(r.label)} hit its usage limit</h3>
+      <div class="sub">${esc(r.limited.message || '')} · ${esc(limitText(r.limited))}</div>
+      <p style="margin:0">These agents are paused until the limit resets. Tasks they were working on went back to Todo without using an attempt.</p>
+      <section><h4>Agents to switch</h4>${affected.map((a) => `<label class="check"><input type="checkbox" checked value="${esc(a.id)}"> ${esc(a.id)} <span class="tag">${esc(a.role)}</span>${a.current_task ? ` <span class="tag">${esc(a.current_task)}</span>` : ''}</label>`).join('')}</section>
+      <section><h4>Switch them to</h4><div class="rtpick">${alt.map((x, i) => rtOption(x, i === alt.findIndex((y) => y.installed))).join('')}</div></section>
+      <div class="actions"><button id="lkeep">Keep waiting</button><button class="go" id="lswitch">Switch agents</button></div>`;
+    const dlg = $('#limitdlg');
+    let pick = alt.find((x) => x.installed)?.name;
+    dlg.querySelectorAll('.rtopt').forEach((b) => b.onclick = () => { pick = b.dataset.rt; dlg.querySelectorAll('.rtopt').forEach((x) => x.setAttribute('aria-pressed', x === b)); });
+    $('#lkeep').onclick = () => dlg.close();
+    $('#lswitch').onclick = async () => {
+      const ids = [...dlg.querySelectorAll('input[type=checkbox]:checked')].map((x) => x.value);
+      if (!pick || !ids.length) return;
+      await switchRuntime(r.name, pick, ids); dlg.close();
+    };
+    dlg.showModal();
+  }
+}
+const rtOption = (r, selected) => `<button type="button" class="rtopt" data-rt="${esc(r.name)}" aria-pressed="${selected ? 'true' : 'false'}" ${!r.installed && r.name !== 'mock' ? 'title="Command not found on this computer"' : ''}>
+  <span class="radio"></span><span><b>${esc(r.label)}</b><small>${esc(r.cmd)}${r.note ? ` · ${esc(r.note)}` : ''}</small></span>
+  ${r.limited ? `<span class="tag bad">limit · ${esc(limitText(r.limited))}</span>` : r.installed ? '<span class="tag ok">ready</span>' : '<span class="tag bad">not installed</span>'}</button>`;
+
+// ================= board =================
+const match = (x) => !filterText || `${x.id} ${x.title} ${x.role || ''} ${x.assignee || ''} ${x.type || ''}`.toLowerCase().includes(filterText);
+function renderBoard() {
+  const isAct = tab === 'activity';
+  $('#board').hidden = isAct; $('#activity').hidden = !isAct;
+  $('#newitem').hidden = isAct; $('#filter').hidden = isAct;
+  $('#newitem').textContent = tab === 'issues' ? 'New issue' : 'New task';
+  $('#ctasks').textContent = S.tasks.filter((t) => t.status !== 'done').length || '';
+  $('#cissues').textContent = S.issues.filter((i) => i.status !== 'done').length || '';
+  if (isAct) return renderActivity();
+  const items = (tab === 'tasks' ? S.tasks : S.issues).filter(match);
+  $('#board').innerHTML = STATUSES.map((st) => {
+    const list = items.filter((x) => x.status === st);
+    return `<div class="col" data-status="${st}"><h3><i></i>${LABEL[st]} <span>${list.length}</span></h3>
+      <div class="list">${list.map((x) => tab === 'tasks' ? taskCard(x) : issueCard(x)).join('') || `<div class="empty">${emptyText(st)}</div>`}</div></div>`;
+  }).join('');
+}
+const emptyText = (st) => ({ todo: tab === 'tasks' ? 'Nothing queued. Add a task or ask the orchestrator.' : 'No open issues.', 'in-progress': 'No agent is working right now.', done: 'Finished work shows up here.', pending: 'Nothing is waiting for you.' })[st];
+
+function taskActions(t) {
+  if (t.status === 'done') return '';
+  if (taskRunning(t)) return `<button class="warn" data-act="stop" data-id="${esc(t.id)}">■ Stop</button>`;
+  if (t.status === 'pending') return `<button class="go" data-act="retry" data-id="${esc(t.id)}">↻ Retry</button>`;
+  return `<button class="go" data-act="run" data-id="${esc(t.id)}">▶ Run</button>`;
+}
+function taskCard(t) {
+  const running = taskRunning(t);
+  const deps = (t.depends_on || []).filter((d) => S.tasks.find((x) => x.id === d)?.status !== 'done');
+  return `<div class="card" draggable="true" tabindex="0" data-id="${esc(t.id)}" data-status="${esc(t.status)}">
+    <div class="meta"><span class="id">${esc(t.id)}</span><span class="prio-${esc(t.priority)}">${esc(t.priority)}</span><span>${esc(t.role)}</span>
+      ${t.attempts ? `<span>try ${t.attempts}</span>` : ''}${t.issues?.length ? `<span>${t.issues.length} issue${t.issues.length > 1 ? 's' : ''}</span>` : ''}${t.issue_ref ? `<span>fixes ${esc(t.issue_ref)}</span>` : ''}</div>
+    <div class="title">${esc(t.title)}</div>
+    ${running && t.status === 'in-progress' ? `<div class="who"><span class="spin"></span>${esc(t.assignee || 'starting')}${t.submitted ? ' · verifying' : ' is working'}</div>` : ''}
+    ${running && t.status !== 'in-progress' ? `<div class="who"><span class="spin"></span>${esc(S.jobs[t.id]?.reason || 'starting run')}</div>` : ''}
+    ${t.status === 'pending' && t.pending_reason ? `<div class="why">${esc(t.pending_reason)}</div>` : ''}
+    ${deps.length && t.status === 'todo' ? `<div class="after">after ${esc(deps.join(', '))}</div>` : ''}
+    ${t.status !== 'done' ? `<div class="acts">${taskActions(t)}</div>` : ''}</div>`;
+}
+function issueActions(i) {
+  if (i.status === 'done') return '';
+  if (i.type === 'blocker' && i.task) return `<button data-act="open" data-id="${esc(i.task)}">Answer on ${esc(i.task)}</button>`;
+  const fix = i.fix_task && S.tasks.find((t) => t.id === i.fix_task);
+  if (fix && taskRunning(fix)) return `<button class="warn" data-act="istop" data-id="${esc(i.id)}">■ Stop</button>`;
+  if (fix && fix.status === 'pending') return `<button class="go" data-act="retry" data-id="${esc(fix.id)}">↻ Retry ${esc(fix.id)}</button>`;
+  return `<button class="go" data-act="irun" data-id="${esc(i.id)}">▶ Run fix</button>`;
+}
+function issueCard(i) {
+  const fix = i.fix_task && S.tasks.find((t) => t.id === i.fix_task);
+  return `<div class="card" draggable="true" tabindex="0" data-id="${esc(i.id)}" data-status="${esc(i.status)}">
+    <div class="meta"><span class="id">${esc(i.id)}</span><span class="sev-${esc(i.severity)}">${esc(i.severity)}</span><span>${esc(i.type)}</span>${i.task ? `<span>on ${esc(i.task)}</span>` : ''}${fix ? `<span>fix ${esc(fix.id)} · ${esc(LABEL[fix.status])}</span>` : ''}</div>
+    <div class="title">${esc(i.title)}</div>
+    ${fix && taskRunning(fix) ? `<div class="who"><span class="spin"></span>${esc(fix.assignee || 'starting')} is fixing</div>` : ''}
+    ${i.status !== 'done' ? `<div class="acts">${issueActions(i)}</div>` : ''}</div>`;
+}
+function renderActivity() {
+  $('#activity').innerHTML = [...S.activity].reverse().map((e) =>
+    `<div class="row"><time>${esc(ago(e.at))} ago</time><span class="by">${esc(e.by)}</span><span>${esc(e.text)}</span></div>`).join('') || '<p class="chatempty">Nothing has happened yet.</p>';
+}
+
+async function runTask(id) { await api('POST', `/api/tasks/${id}/run`); toast(`Running ${id}`); }
+async function stopTask(id) { await api('POST', `/api/tasks/${id}/stop`); toast(`Stopping ${id}`); }
+async function retryTask(id, quiet) {
+  const r = await api('POST', `/api/tasks/${id}/retry`, {});
+  if (!quiet) toast(r.queued ? `${id} is back in the queue; the loop will pick it up` : `Retrying ${id} now`);
+}
+$('#board').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]');
+  if (b) {
+    e.stopPropagation();
+    b.disabled = true;
+    const id = b.dataset.id;
+    try {
+      if (b.dataset.act === 'run') await runTask(id);
+      if (b.dataset.act === 'stop') await stopTask(id);
+      if (b.dataset.act === 'retry') await retryTask(id);
+      if (b.dataset.act === 'open') openDetail(id);
+      if (b.dataset.act === 'irun') { const r = await api('POST', `/api/issues/${id}/run`); toast(`Running fix task ${r.task} for ${id}`); }
+      if (b.dataset.act === 'istop') { await api('POST', `/api/issues/${id}/stop`); toast(`Stopping the fix for ${id}`); }
+    } finally { b.disabled = false; }
+    return;
+  }
+  const c = e.target.closest('.card'); if (c) openDetail(c.dataset.id);
+});
+$('#board').addEventListener('keydown', (e) => { const c = e.target.closest('.card'); if (c && e.key === 'Enter' && e.target === c) openDetail(c.dataset.id); });
+let dragId = null;
+$('#board').addEventListener('dragstart', (e) => { const c = e.target.closest('.card'); if (c) dragId = c.dataset.id; });
+$('#board').addEventListener('dragover', (e) => { const col = e.target.closest('.col'); if (col) { e.preventDefault(); col.classList.add('drop'); } });
+$('#board').addEventListener('dragleave', (e) => { const col = e.target.closest('.col'); if (col && !col.contains(e.relatedTarget)) col.classList.remove('drop'); });
+$('#board').addEventListener('drop', async (e) => {
+  const col = e.target.closest('.col'); if (!col || !dragId) return;
+  e.preventDefault(); col.classList.remove('drop');
+  const kind = dragId.startsWith('T-') ? 'tasks' : 'issues';
+  await api('PATCH', `/api/${kind}/${dragId}`, { status: col.dataset.status, note: `Moved to ${col.dataset.status} from the dashboard` });
+  dragId = null;
+});
+document.querySelectorAll('.tab').forEach((b) => b.onclick = () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll('.tab').forEach((x) => x.setAttribute('aria-selected', x === b));
+  renderBoard();
+});
+$('#filter').oninput = (e) => { filterText = e.target.value.trim().toLowerCase(); renderBoard(); };
+
+// ================= detail dialog =================
+function openDetail(id) {
+  const isTask = id.startsWith('T-');
+  const x = (isTask ? S.tasks : S.issues).find((y) => y.id === id);
+  if (!x) return;
+  const kind = isTask ? 'tasks' : 'issues';
+  const running = isTask && taskRunning(x);
+  const primary = isTask
+    ? (x.status === 'done' ? '' : running ? `<button class="warn" data-a="stop">■ Stop run</button>` : x.status === 'pending' ? `<button class="go" data-a="retry">↻ Retry</button>` : `<button class="go" data-a="run">▶ Run now</button>`)
+    : (x.status === 'done' ? '' : x.type === 'blocker' && x.task ? `<button data-a="opentask">Open ${esc(x.task)}</button>` : `<button class="go" data-a="irun">▶ Run fix</button>`);
+  $('#detailbody').innerHTML = `
+    <h3>${esc(x.id)} · ${esc(x.title)}</h3>
+    <div class="kv"><span>Status <b>${esc(LABEL[x.status])}</b></span>
+      ${isTask ? `<span>Priority <b>${esc(x.priority)}</b></span><span>Role <b>${esc(x.role)}</b></span><span>Attempts <b>${x.attempts || 0}</b></span>` : `<span>Type <b>${esc(x.type)}</b></span><span>Severity <b>${esc(x.severity)}</b></span>${x.task ? `<span>Task <b>${esc(x.task)}</b></span>` : ''}${x.fix_task ? `<span>Fix <b>${esc(x.fix_task)}</b></span>` : ''}`}
+      ${x.assignee ? `<span>Agent <b>${esc(x.assignee)}</b></span>` : ''}</div>
+    ${x.pending_reason && x.status === 'pending' ? `<div class="alert pend"><div class="msg">${esc(x.pending_reason)}</div></div>` : ''}
+    ${x.description ? `<div style="white-space:pre-wrap">${esc(x.description)}</div>` : ''}
+    ${isTask && x.acceptance?.length ? `<section><h4>Acceptance criteria</h4><ul style="margin:0;padding-left:20px">${x.acceptance.map((a) => `<li>${esc(a)}</li>`).join('')}</ul></section>` : ''}
+    ${isTask && x.depends_on?.length ? `<div class="kv">Depends on <b>${esc(x.depends_on.join(', '))}</b></div>` : ''}
+    ${isTask && x.last_feedback ? `<section><h4>Feedback from the last attempt</h4><div class="feedback">${esc(x.last_feedback)}</div></section>` : ''}
+    <section><h4>Notes</h4><div class="notes">${(x.notes || []).slice().reverse().map((n) => `<div><time>${esc(ago(n.at))} ago</time> <b>${esc(n.by)}</b><br>${esc(n.text)}</div>`).join('') || '<div>No notes yet.</div>'}</div></section>
+    <label class="f">${x.status === 'pending' ? 'Answer the question or add a hint, then Retry' : 'Add a note'}<textarea id="dnote" rows="3"></textarea></label>
+    <div class="actions">
+      <div class="left"><select id="dmove" aria-label="Move to status" style="width:auto"><option value="">Move to…</option>${STATUSES.filter((s) => s !== x.status).map((s) => `<option value="${s}">${LABEL[s]}</option>`).join('')}</select></div>
+      <button data-a="note">Save note</button>${primary}<button data-a="close">Close</button>
+    </div>`;
+  const dlg = $('#detail');
+  if (!dlg.open) dlg.showModal();
+  const note = () => $('#dnote').value.trim();
+  $('#dmove').onchange = async (e) => { if (!e.target.value) return; await api('PATCH', `/api/${kind}/${id}`, { status: e.target.value, note: note() || `Moved to ${e.target.value} from the dashboard` }); dlg.close(); };
+  dlg.querySelectorAll('[data-a]').forEach((b) => b.onclick = async () => {
+    const a = b.dataset.a;
+    if (a === 'close') return dlg.close();
+    if (a === 'opentask') return openDetail(x.task);
+    if (a === 'note') { if (note()) await api('PATCH', `/api/${kind}/${id}`, { note: note() }); return dlg.close(); }
+    if (note() && a !== 'retry') await api('PATCH', `/api/${kind}/${id}`, { note: note() });
+    if (a === 'run') await runTask(id);
+    if (a === 'stop') await stopTask(id);
+    if (a === 'retry') { const r = await api('POST', `/api/tasks/${id}/retry`, { note: note() }); toast(r.queued ? `${id} is back in the queue` : `Retrying ${id} now`); }
+    if (a === 'irun') { const r = await api('POST', `/api/issues/${id}/run`); toast(`Running fix task ${r.task}`); }
+    dlg.close();
+  });
+}
+
+$('#newitem').onclick = () => {
+  const isTask = tab === 'tasks';
+  $('#newform').reset();
+  $('#newtitle').textContent = isTask ? 'New task' : 'New issue';
+  $('#newsubmit').textContent = isTask ? 'Create task' : 'Open issue';
+  $('#taskfields').hidden = !isTask; $('#acceptfield').hidden = !isTask; $('#issuefields').hidden = isTask;
+  $('#newform').role.innerHTML = S.roles.map((r) => `<option ${r === 'implementer' ? 'selected' : ''}>${esc(r)}</option>`).join('');
+  $('#newdlg').showModal();
+};
+$('#newdlg').addEventListener('close', async () => {
+  if ($('#newdlg').returnValue !== 'ok') return;
+  const f = $('#newform');
+  const split = (v, re) => v.split(re).map((s) => s.trim()).filter(Boolean);
+  if (!$('#taskfields').hidden) {
+    await api('POST', '/api/tasks', { title: f.title.value, description: f.description.value, role: f.role.value, priority: f.priority.value,
+      depends_on: split(f.depends_on.value, /[,\s]+/), acceptance: split(f.acceptance.value, /\n/) });
+  } else {
+    await api('POST', '/api/issues', { title: f.title.value, description: f.description.value, type: f.type.value, severity: f.severity.value, task: f.task.value.trim() || null });
+  }
+});
+
+// ================= agent dialog: runtime + model + live log =================
+const logLine = (e) => `<div class="${esc(e.kind)}">${esc(new Date(e.at).toLocaleTimeString())}  ${e.kind === 'tool' ? '▸ ' : ''}${esc(e.text)}</div>`;
+async function openAgentDialog(id) {
+  openAgent = id;
+  renderAgentDialog();
+  $('#agentdlg').showModal();
+  const evs = await api('GET', `/api/runs/${id}`);
+  $('#log').innerHTML = evs.map(logLine).join('') || '<div class="start">No runs yet.</div>';
+  $('#log').scrollTop = 1e9;
+}
+function renderAgentDialog() {
+  const a = S.agents.find((x) => x.id === openAgent);
+  if (!a) return;
+  const keepLog = $('#log')?.innerHTML;
+  $('#agentbody').innerHTML = `
+    <h3>${esc(a.id)}</h3>
+    <div class="sub">${esc(a.role)} — ${esc(a.description)}</div>
+    ${a.limited ? `<div class="alert limit"><div class="msg"><b>${esc(rtLabel(a.runtime))} hit its usage limit</b> — ${esc(limitText(a.limited))}. Pick another runtime below to continue now.</div><button data-clear="${esc(a.runtime)}">Mark available</button></div>` : ''}
+    <section><h4>Runs on</h4><div class="rtpick" id="agentrt">${S.runtimes.map((r) => rtOption(r, r.name === a.runtime)).join('')}</div></section>
+    <div class="grid2">
+      <label class="f">Model (optional, for ${esc(rtLabel(a.runtime))})<input id="amodel" value="${esc(a.model)}" placeholder="default"></label>
+      <label class="check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="aenabled" ${a.enabled ? 'checked' : ''}> Enabled (the loop can give it work)</label>
+    </div>
+    <section><h4>Now</h4><div class="kv"><span class="dot ${esc(a.limited ? 'limited' : a.status)}" style="align-self:center"></span><b>${esc(a.limited ? 'paused by limit' : a.status)}</b>${a.current_task ? `<span>on <b>${esc(a.current_task)}</b></span>` : ''}${a.last_activity ? `<span>${ago(a.last_activity)} ago</span>` : ''}</div></section>
+    <section><h4>Recent work</h4><div id="log">${keepLog || ''}</div></section>
+    <div class="actions">
+      <div class="left">${a.status === 'running' ? `<button class="warn" id="astop">■ Stop this turn</button>` : ''}<button id="achat">Chat with ${esc(a.id)}</button></div>
+      <button id="asave">Save model</button><button class="primary" id="aclose">Done</button>
+    </div>`;
+  const body = $('#agentbody');
+  body.querySelectorAll('#agentrt .rtopt').forEach((b) => b.onclick = async () => {
+    if (b.dataset.rt === a.runtime) return;
+    await api('PATCH', `/api/agents/${a.id}`, { runtime: b.dataset.rt });
+    toast(`${a.id} now runs on ${rtLabel(b.dataset.rt)}${a.status === 'running' ? ' from its next turn' : ''}`);
+  });
+  body.querySelector('[data-clear]')?.addEventListener('click', async (e) => { await api('POST', `/api/runtimes/${e.target.dataset.clear}/clear-limit`); });
+  $('#aenabled').onchange = async (e) => { await api('PATCH', `/api/agents/${a.id}`, { enabled: e.target.checked }); };
+  $('#asave').onclick = async () => { await api('PATCH', `/api/agents/${a.id}`, { model: $('#amodel').value.trim() }); toast('Model saved'); };
+  $('#astop')?.addEventListener('click', async () => { if (a.current_task) await stopTask(a.current_task); else await api('POST', `/api/agents/${a.id}/stop`); });
+  $('#achat').onclick = () => { $('#agentdlg').close(); selectChatAgent(a.id); $('#chatinput').focus(); };
+  $('#aclose').onclick = () => $('#agentdlg').close();
+}
+$('#agentdlg').addEventListener('close', () => { openAgent = null; });
+
+// ================= settings dialog =================
+function openSettings() {
+  const st = S.settings || {}; const L = st.loop || {};
+  $('#settingsbody').innerHTML = `
+    <h3>Settings</h3>
+    <section><h4>Runtime for agents</h4>
+      <div class="rtpick" id="srt">${S.runtimes.map((r) => rtOption(r, r.name === st.default_runtime)).join('')}</div>
+      <div class="actions" style="justify-content:flex-start"><button id="sdefault">Make default for new agents</button><button class="go" id="sall">Use for every agent</button></div>
+      <div class="sub" style="margin-top:0">To set one agent, click it in the Agents list.</div>
+    </section>
+    <section><h4>Loop</h4>
+      <div class="grid3">
+        <label class="f">Agents in parallel<input type="number" min="1" max="10" id="lpar" value="${L.max_parallel ?? 1}"></label>
+        <label class="f">Attempts per task<input type="number" min="1" max="10" id="latt" value="${L.max_attempts ?? 3}"></label>
+        <label class="f">Max dispatches per run<input type="number" min="1" max="50" id="lit" value="${L.max_iterations ?? 30}"></label>
+      </div>
+      <label class="f" style="margin-top:8px">Quality gate command<input id="lgate" value="${esc(L.gate_command ?? '')}"></label>
+      <div style="display:grid;gap:6px;margin-top:10px">
+        <label class="check"><input type="checkbox" id="lrev" ${L.review !== false ? 'checked' : ''}> Reviewer agent checks every submitted task</label>
+        <label class="check"><input type="checkbox" id="lwt" ${L.use_worktrees ? 'checked' : ''}> Separate git worktree and branch per task (safer with parallel agents)</label>
+      </div>
+    </section>
+    <div class="actions"><button id="sclose">Cancel</button><button class="primary" id="ssave">Save loop settings</button></div>`;
+  let pick = st.default_runtime;
+  const body = $('#settingsbody');
+  body.querySelectorAll('#srt .rtopt').forEach((b) => b.onclick = () => { pick = b.dataset.rt; body.querySelectorAll('#srt .rtopt').forEach((x) => x.setAttribute('aria-pressed', x === b)); });
+  $('#sdefault').onclick = async () => { await api('PATCH', '/api/settings', { default_runtime: pick }); toast(`New agents default to ${rtLabel(pick)}`); };
+  $('#sall').onclick = async () => { await api('POST', '/api/runtimes/switch', { to: pick, agents: S.agents.map((a) => a.id) }); await api('PATCH', '/api/settings', { default_runtime: pick }); toast(`Every agent now runs on ${rtLabel(pick)}`); };
+  $('#sclose').onclick = () => $('#settingsdlg').close();
+  $('#ssave').onclick = async () => {
+    await api('PATCH', '/api/settings', { loop: { max_parallel: $('#lpar').value, max_attempts: $('#latt').value, max_iterations: $('#lit').value, gate_command: $('#lgate').value, review: $('#lrev').checked, use_worktrees: $('#lwt').checked } });
+    toast('Loop settings saved — they apply from the next dispatch'); $('#settingsdlg').close();
+  };
+  $('#settingsdlg').showModal();
+}
+$('#opensettings').onclick = openSettings;
+$('#railsettings').onclick = openSettings;
+
+// ================= chat =================
+function renderChatControls() {
+  const sel = $('#chatagent');
+  const opts = S.agents.map((a) => `<option value="${esc(a.id)}">${esc(a.id)} — ${esc(a.role)}</option>`).join('');
+  if (sel.dataset.sig !== opts) { sel.innerHTML = opts; sel.dataset.sig = opts; }
+  if (!C.agent) { C.agent = (S.agents.find((a) => a.role === 'orchestrator') || S.agents[0])?.id; if (C.agent) loadChat(); }
+  sel.value = C.agent || '';
+  const agent = S.agents.find((a) => a.id === C.agent);
+  const current = C.data?.chat?.runtime || C.pendingRuntime || agent?.runtime;
+  const rsel = $('#chatruntime');
+  rsel.innerHTML = S.runtimes.map((r) => `<option value="${esc(r.name)}" ${!r.installed && r.name !== 'mock' ? 'disabled' : ''}>${esc(r.label)}${r.name === agent?.runtime ? ' (agent default)' : ''}${r.limited ? ' — limit reached' : !r.installed ? ' — not installed' : ''}</option>`).join('');
+  rsel.value = current || '';
+  const lim = S.runtimes.find((r) => r.name === current)?.limited;
+  $('#chatwarn').textContent = lim ? `⚠ ${rtLabel(current)} hit its usage limit (${limitText(lim)}). Pick another runtime to keep chatting.` : '';
+  const chats = C.data?.chats || [];
+  $('#chatlist').innerHTML = chats.length
+    ? chats.map((c) => `<option value="${esc(c.id)}">${esc(c.title)} · ${esc(new Date(c.updated_at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}${c.saved_path ? ' · saved' : ''}</option>`).join('')
+    : '<option value="">New conversation</option>';
+  $('#chatlist').value = C.data?.current || '';
+  $('#savechat').disabled = !C.data?.messages?.length;
+  const replying = !!C.data?.replying;
+  $('#send').hidden = replying; $('#stopreply').hidden = !replying;
+}
+const msgHtml = (m) => m.from === 'human'
+  ? `<div class="msg human">${esc(m.text)}</div>`
+  : `<div class="msg agent ${m.ok === false ? 'fail' : ''}"><span class="by">${esc(m.from)}${m.runtime ? ` · ${esc(rtLabel(m.runtime))}` : ''}</span>${esc(m.text)}</div>`;
+function renderMsgs() {
+  const d = C.data;
+  const box = $('#msgs');
+  box.innerHTML = d?.messages?.length ? d.messages.map(msgHtml).join('')
+    : `<p class="chatempty">Start a conversation with ${esc(C.agent || 'an agent')}.<br>The orchestrator reads the board, answers questions and turns requests into tasks for the other agents.</p>`;
+  if (d?.replying) box.insertAdjacentHTML('beforeend', '<div class="trace" id="typing"><span class="spin"></span><span>working…</span></div>');
+  box.scrollTop = 1e9;
+}
+async function loadChat(chatId) {
+  if (!C.agent) return;
+  C.data = await api('GET', `/api/chat/${C.agent}${chatId ? `?chat=${chatId}` : ''}`);
+  renderChatControls(); renderMsgs();
+}
+function selectChatAgent(id) { C.agent = id; C.data = null; C.pendingRuntime = null; loadChat(); }
+$('#chatagent').onchange = (e) => selectChatAgent(e.target.value);
+$('#chatlist').onchange = async (e) => { if (!e.target.value) return; C.data = await api('POST', `/api/chat/${C.agent}/select`, { chatId: e.target.value }); renderChatControls(); renderMsgs(); };
+$('#chatruntime').onchange = async (e) => {
+  if (C.data?.current) C.data = await api('POST', `/api/chat/${C.agent}/runtime`, { chatId: C.data.current, runtime: e.target.value });
+  else C.pendingRuntime = e.target.value;
+  renderChatControls();
+};
+$('#newchat').onclick = async () => { C.pendingRuntime = null; C.data = await api('POST', `/api/chat/${C.agent}/new`, { runtime: $('#chatruntime').value }); renderChatControls(); renderMsgs(); $('#chatinput').focus(); };
+$('#savechat').onclick = async () => {
+  const r = await api('POST', `/api/chat/${C.agent}/save`, { chatId: C.data?.current });
+  toast(`Saved to ${r.path}`, { label: 'Download', run: () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([r.markdown], { type: 'text/markdown' }));
+    a.download = r.path.split('/').pop(); a.click(); URL.revokeObjectURL(a.href);
+  } });
+  loadChat(C.data?.current);
+};
+$('#stopreply').onclick = () => api('POST', `/api/chat/${C.agent}/stop`, {});
+$('#chatform').onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $('#chatinput').value.trim();
+  if (!text || C.data?.replying) return;
+  $('#chatinput').value = '';
+  try {
+    const r = await api('POST', `/api/chat/${C.agent}/send`, { message: text, chatId: C.data?.current, runtime: $('#chatruntime').value });
+    if (!C.data?.current || C.data.current !== r.chatId) await loadChat(r.chatId);
+  } catch { $('#chatinput').value = text; }
+};
+$('#chatinput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#chatform').requestSubmit(); } });
+
+// ================= live updates =================
+function renderAll() {
+  renderHeader(); renderRail(); renderAttention(); renderBoard(); renderChatControls();
+  const typing = $('#agentdlg').contains(document.activeElement) && /INPUT|TEXTAREA/.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox';
+  if (openAgent && $('#agentdlg').open && !typing) renderAgentDialog();
+  promptLimits();
+}
+function connect() {
+  const es = new EventSource('/api/events');
+  es.addEventListener('state', (e) => { S = JSON.parse(e.data); renderAll(); });
+  es.addEventListener('chat', (e) => {
+    const m = JSON.parse(e.data);
+    if (m.agent !== C.agent) return;
+    if (!C.data || C.data.current !== m.chatId) return loadChat(m.chatId);
+    C.data.messages.push(m);
+    C.data.replying = m.from === 'human' ? m.chatId : null;
+    renderMsgs(); renderChatControls();
+  });
+  es.addEventListener('chat-state', (e) => { const m = JSON.parse(e.data); if (m.agent === C.agent && C.data) { C.data.replying = null; renderChatControls(); $('#typing')?.remove(); } });
+  es.addEventListener('agent', (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.mode === 'chat' && ev.agent === C.agent && ev.kind === 'tool') { const t = $('#typing span:last-child'); if (t) t.textContent = `▸ ${ev.text}`; }
+    if (openAgent === ev.agent && ev.mode !== 'chat' && $('#log')) { $('#log').insertAdjacentHTML('beforeend', logLine(ev)); $('#log').scrollTop = 1e9; }
+    if (ev.mode !== 'chat' && (ev.kind === 'tool' || ev.kind === 'text')) {
+      const l3 = document.querySelector(`.agent[data-agent="${CSS.escape(ev.agent)}"] .l3`);
+      const a = S.agents.find((x) => x.id === ev.agent);
+      if (l3 && a) l3.innerHTML = `<b>${esc(a.current_task || (a.asked_by ? `for ${a.asked_by}` : ''))}</b> ${esc(ev.text)}`;
+    }
+  });
+  es.onerror = () => { es.close(); $('#looptext').textContent = 'Dashboard server disconnected — reconnecting…'; setTimeout(connect, 2000); };
+}
+
+if (location.protocol === 'file:') {
+  document.body.style.overflow = 'auto';
+  document.body.innerHTML = `<div style="max-width:620px;margin:60px auto;padding:0 20px">
+    <h1 style="font-size:20px">Start the dashboard server first</h1>
+    <p>This page reads live data from the local harness server, so it can't run when opened as a file.</p>
+    <p>In the project folder, run one of these, then open <b>http://127.0.0.1:4317</b>:</p>
+    <pre style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px">macOS / Linux:  ./dashboard.sh
+Windows:        dashboard.cmd
+Any OS:         node harness/server.mjs</pre></div>`;
+} else {
+  connect();
+  setInterval(() => { if (tab === 'activity') renderActivity(); }, 15000);
+}
+</script>
+</body>
+</html>

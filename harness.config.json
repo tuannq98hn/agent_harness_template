@@ -1,0 +1,109 @@
+{
+  "project": "My Project",
+  "default_runtime": "claude",
+  "agents": [
+    {
+      "id": "orchestrator",
+      "role": "orchestrator"
+    },
+    {
+      "id": "planner",
+      "role": "planner"
+    },
+    {
+      "id": "dev-1",
+      "role": "implementer"
+    },
+    {
+      "id": "dev-2",
+      "role": "implementer"
+    },
+    {
+      "id": "tester",
+      "role": "tester"
+    },
+    {
+      "id": "reviewer",
+      "role": "reviewer"
+    },
+    {
+      "id": "docs",
+      "role": "docs-gardener"
+    }
+  ],
+  "loop": {
+    "max_parallel": 1,
+    "max_iterations": 30,
+    "max_attempts": 3,
+    "poll_ms": 3000,
+    "review": true,
+    "gate_command": "bash scripts/agent/run_quality_gate.sh",
+    "gate_timeout_s": 1800,
+    "use_worktrees": false
+  },
+  "ask": {
+    "max_depth": 1,
+    "timeout_s": 540,
+    "readonly_tools": "Read,Glob,Grep"
+  },
+  "dashboard": {
+    "port": 4317
+  },
+  "runtimes": {
+    "claude": {
+      "label": "Claude Code",
+      "cmd": "claude",
+      "args": [
+        "-p",
+        "{prompt}",
+        "--append-system-prompt",
+        "{system}",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        "{tools}"
+      ],
+      "resume_args": [
+        "--resume",
+        "{session}"
+      ],
+      "model_args": [
+        "--model",
+        "{model}"
+      ],
+      "default_tools": "Read,Edit,Write,Glob,Grep,Bash",
+      "parser": "claude-stream-json"
+    },
+    "codex": {
+      "label": "Codex",
+      "note": "Chat history is replayed (no resume)",
+      "cmd": "codex",
+      "args": [
+        "exec",
+        "--json",
+        "--full-auto",
+        "{full_prompt}"
+      ],
+      "resume_args": null,
+      "model_args": [
+        "--model",
+        "{model}"
+      ],
+      "parser": "jsonl"
+    },
+    "mock": {
+      "label": "Mock",
+      "note": "Fake agent, no tokens — for trying the dashboard",
+      "cmd": "node",
+      "args": [
+        "{root}/harness/adapters/mock-agent.mjs",
+        "{prompt_file}"
+      ],
+      "resume_args": null,
+      "parser": "claude-stream-json"
+    }
+  }
+}
