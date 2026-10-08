@@ -9,8 +9,10 @@ Reusable repository harness for AI-agent-assisted development, with:
 - **A local dashboard** — live agent activity, task and issue boards
   (todo / in-progress / done / pending), activity log, and chat with any agent.
 - **Per-agent runtime** — pick Claude Code or Codex (and a model) for each agent from the dashboard.
-- **Usage-limit handling** — a limit pauses the agents on that runtime, requeues their tasks
-  without using an attempt, and offers to switch them to another runtime.
+- **Usage-limit handling** — a limit pauses the agents on that runtime and requeues their tasks
+  without using an attempt. Choose what happens next: wait and continue automatically when the limit
+  resets (default), switch to the other runtime and back, or stop. **All agents on** switches every
+  agent between Claude Code and Codex in one click.
 - **Run / Stop / Retry** for a single task or issue, next to Start/Stop for the whole loop.
 - **Bug flow** — every bug is first reproduced by the tester into `docs/bugs/<ISSUE>.md` (steps,
   environment, evidence, skipped failing test), then fixed by an implementer who starts from that report.
@@ -50,7 +52,7 @@ Dashboard at a glance:
 | Area | What you do there |
 |---|---|
 | Top bar | Start / stop the whole loop, open Settings (runtimes, parallel agents, attempts, gate) |
-| Agents (left) | See who is working on what; click an agent to change its runtime/model or watch its log |
+| Agents (left) | **All agents on** switches every agent's runtime; click an agent to change its runtime/model or watch its log |
 | Needs you strip | Usage-limit warnings with "Switch to …", pending tasks with Retry |
 | Board (center) | Tasks / Issues / Activity; ▶ Run, ■ Stop, ↻ Retry on each card; drag between columns |
 | Chat (right) | Pick agent and runtime, switch between past chats, New, Save to `docs/chat-logs/` |
@@ -152,7 +154,8 @@ after you fix it you press **Test again** (or Settings → Test). A CLI that pri
 | Symptom | What to do |
 |---|---|
 | Banner "cannot run in this project yet" | Run that CLI once in the project folder (see above), then Test again |
-| Banner "hit its usage limit" | Wait for the reset, or Switch / Choose another runtime |
+| Banner "hit its usage limit" | Default: nothing — the loop continues at the reset time. Or Switch / Check now |
+| Start loop says "Nothing can start" | Every todo task waits on a pending task: answer it and Retry, or ▶ Run one task |
 | Agents switched but nothing runs | Check the runtime tag in Settings: *works* / *needs setup* / *not found* |
 | Dashboard not responding | Look at `.harness/dashboard.log`, then restart `./dashboard.sh` (board state is kept) |
 

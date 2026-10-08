@@ -5,7 +5,10 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { ROOT, P, loadConfig, loadRole, setAgent, getAgents, setLimit, runtimeOf, setHealth, getHealth, listSkills, roleSkills, now } from './store.mjs';
+import {
+  ROOT, P, loadConfig, loadRole, setAgent, getAgents, setLimit, getLimits, clearLimit, mutate, runtimeOf, setHealth, getHealth,
+  listSkills, roleSkills, parseReset, limitPolicy, setAgentsRuntime, logActivity, now,
+} from './store.mjs';
 
 export const bus = new EventEmitter(); // emits 'agent-event' { agent, runId, kind, text }
 const live = new Map(); // key -> child process (for stop)
@@ -32,9 +35,9 @@ const LIMIT_RE = /usage limit|rate[ _-]?limit|quota|too many requests|\b429\b|li
 export function detectLimit(text) {
   if (!text || !LIMIT_RE.test(text)) return null;
   const line = text.split('\n').find((l) => LIMIT_RE.test(l)) || text;
-  let resets_at = null;
-  const epoch = text.match(/limit reached\|(\d{10})/i); // Claude Code: "Claude AI usage limit reached|1759830000"
-  if (epoch) resets_at = new Date(Number(epoch[1]) * 1000).toISOString();
+  let resets_at = parseReset(text);
+  // Ignore reset times in the past or absurdly far away; the harness then re-checks periodically.
+  if (resets_at) { const dt = Date.parse(resets_at) - Date.now(); if (dt < 30000 || dt > 8 * 864e5) resets_at = null; }
   return { message: line.replace(/\|\d{10}/, '').trim().slice(0, 300), resets_at };
 }
 
@@ -243,7 +246,7 @@ export function runAgent(o) {
       if (buf.trim()) for (const e of parseLine(rt.parser, buf, state)) { events++; emit(e.kind, e.text); }
       live.delete(key);
       const ok = code === 0 && !state.isError && !timedOut;
-      const failText = `${state.isError ? state.result : ''}\n${errText}`;
+      const failText = `${state.result || lastText || ''}\n${errText}`;
       const limit = ok ? null : detectLimit(failText);
       if (limit) {
         emit('limit', `${runtimeName} usage limit: ${limit.message}`);
@@ -332,7 +335,15 @@ export function checkRuntime(runtimeName, opts = {}) {
       checking.delete(runtimeName);
       try { fs.rmSync(promptFile, { force: true }); } catch {}
       const limit = r.ok ? null : detectLimit(`${state.result}\n${err}`);
-      if (limit) { try { setLimit(runtimeName, { ...limit, agent: 'health-check' }); } catch {} }
+      if (limit) { try { setLimit(runtimeName, { ...limit, agent: 'health-check', last_check: now() }); } catch {} }
+      if (r.ok && getLimits()[runtimeName]) { try { clearLimit(runtimeName, 'harness'); } catch {} }
+      if (!r.ok && (limit || getLimits()[runtimeName])) {
+        // Still failing while limited: keep the limit, don't mark the runtime as "needs setup".
+        try { mutate(P.limits, (db) => { if (db.runtimes[runtimeName]) db.runtimes[runtimeName].last_check = now(); }); } catch {}
+        checking.delete(runtimeName);
+        try { fs.rmSync(promptFile, { force: true }); } catch {}
+        return resolve({ ok: false, checked: true, message: limit ? limit.message : r.message, limited: true });
+      }
       const info = r.ok ? { ok: true, checked: true }
         : { ok: false, checked: true, message: limit ? `usage limit: ${limit.message}` : r.message, hint: limit ? 'Wait for the reset or switch to another runtime.' : setupHint(runtimeName, rt.cmd) };
       try { setHealth(runtimeName, info); } catch {}
@@ -360,3 +371,60 @@ export function checkRuntime(runtimeName, opts = {}) {
   return p;
 }
 export const isChecking = (name) => checking.has(name);
+
+// ---------- Limits: periodic re-check and automatic switch-back ----------
+// Runs in the dashboard and in the loop; a claim in limits.json makes sure only one process probes.
+export async function maybeProbeLimits() {
+  const pol = limitPolicy();
+  const due = [];
+  try {
+    mutate(P.limits, (db) => {
+      const t = Date.now();
+      for (const [name, l] of Object.entries(db.runtimes)) {
+        if (l.resets_at && Date.parse(l.resets_at) > t) continue;         // known reset time: just wait for it
+        const last = Date.parse(l.last_check || l.at || 0) || 0;
+        if (t - last < pol.probe_minutes * 60000) continue;
+        l.last_check = new Date(t).toISOString();                        // claim
+        due.push(name);
+      }
+    });
+  } catch { return []; }
+  const results = [];
+  for (const name of due) {
+    logActivity('harness', `checking whether ${name} is available again`);
+    results.push({ name, ...(await checkRuntime(name)) });
+  }
+  return results;
+}
+
+// Agents that the limit policy moved away go back to their home runtime once it is available.
+export function restoreHomeRuntimes() {
+  const pol = limitPolicy();
+  if (!pol.switch_back) return [];
+  const cfg = loadConfig();
+  const limits = getLimits();
+  const health = getHealth();
+  const groups = {};
+  for (const a of cfg.agents) {
+    if (!a.home_runtime || a.home_runtime === runtimeOf(cfg, a)) continue;
+    if (limits[a.home_runtime] || health[a.home_runtime]?.ok === false) continue;
+    (groups[a.home_runtime] = groups[a.home_runtime] || []).push(a.id);
+  }
+  const moved = [];
+  for (const [home, ids] of Object.entries(groups)) {
+    moved.push(...setAgentsRuntime(ids, home, { by: 'harness' }));
+    logActivity('harness', `${home} is available again — moved ${ids.join(', ')} back`);
+  }
+  return moved;
+}
+
+// Pick the runtime the limit policy switches to.
+export function fallbackRuntime(from) {
+  const cfg = loadConfig();
+  const pol = limitPolicy(cfg);
+  const limits = getLimits();
+  const health = getHealth();
+  const ok = (n) => n && n !== from && cfg.runtimes[n] && !limits[n] && health[n]?.ok !== false;
+  if (pol.fallback !== 'auto') return ok(pol.fallback) ? pol.fallback : null;
+  return Object.keys(cfg.runtimes).find((n) => n !== 'mock' && ok(n)) || null;
+}

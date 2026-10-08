@@ -7,18 +7,21 @@
 //   node harness/loop.mjs --task T-007    run only this task until done/pending/stopped
 //   node harness/loop.mjs --task T-007,T-008   run these tasks in order (stops at the first not done)
 //
-// Usage limits: when an agent's runtime (Claude Code, Codex, ...) hits its plan limit,
-// the task goes back to todo without using an attempt, and agents on that runtime are
-// skipped until the limit resets or you switch them to another runtime in the dashboard.
+// Usage limits: when an agent's runtime (Claude Code, Codex, ...) hits its plan limit, the task
+// goes back to todo without using an attempt. Then, per Settings → "When a runtime hits its limit":
+//   wait   (default) agents on that runtime pause; the loop keeps waiting, re-checks the runtime
+//          (at the reset time, or every limits.probe_minutes) and continues when it is back
+//   switch agents move to another runtime and move back when the limit resets
+//   stop   the loop stops
 import { spawn, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
   ROOT, P, ensureState, loadConfig, loadRole, getTasks, updateTask, addIssue, updateIssue, getIssues,
   getAgents, setAgent, writeJson, readJson, mutate, logActivity, unavailableRuntimes, runtimeOf, pidAlive, now,
-  readDoc, bugReportPath, syncSkills,
+  readDoc, bugReportPath, syncSkills, getLimits, getHealth, limitPolicy, setAgentsRuntime, boardBlockers,
 } from './lib/store.mjs';
-import { runAgent, stopAll, killTree } from './lib/runner.mjs';
+import { runAgent, stopAll, killTree, checkRuntime, maybeProbeLimits, restoreHomeRuntimes, fallbackRuntime } from './lib/runner.mjs';
 
 ensureState();
 const argTasks = (() => { const i = process.argv.indexOf('--task'); return i > 0 ? String(process.argv[i + 1]).split(',').filter(Boolean) : []; })();
@@ -292,6 +295,73 @@ function dispatch(t) {
   return entry;
 }
 
+// ---------- usage-limit policy ----------
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const noted = new Set();
+const noteOnce = (key, text) => { if (!noted.has(key)) { noted.add(key); log(text); } };
+
+// Limited runtimes that enabled agents actually use right now.
+function limitedInUse() {
+  const c = cfg();
+  const lim = getLimits();
+  return Object.keys(lim).filter((n) => c.agents.some((a) => a.enabled !== false && runtimeOf(c, a) === n));
+}
+
+function limitWaitText(names) {
+  const lim = getLimits();
+  const pol = limitPolicy();
+  return names.map((n) => {
+    const l = lim[n] || {};
+    if (l.resets_at) return `${n} resets ${fmtTime(l.resets_at)}`;
+    const next = new Date((Date.parse(l.last_check || l.at) || Date.now()) + pol.probe_minutes * 60000).toISOString();
+    return `${n} — checking again ${fmtTime(next)}`;
+  }).join('; ');
+}
+
+let lastHousekeeping = 0;
+// Returns a stop reason when the policy says to stop, otherwise null.
+async function applyLimitPolicy() {
+  // Re-check limited runtimes and move auto-switched agents back (throttled, cheap).
+  if (Date.now() - lastHousekeeping > 30000) {
+    lastHousekeeping = Date.now();
+    maybeProbeLimits().catch(() => {});
+    try { restoreHomeRuntimes(); } catch {}
+  }
+  const names = limitedInUse();
+  if (!names.length) return null;
+  const pol = limitPolicy();
+  if (pol.on_limit === 'stop') return `usage limit on ${names.join(', ')} — stopped (limit setting: stop)`;
+  if (pol.on_limit === 'switch') {
+    for (const name of names) {
+      const c = cfg();
+      const ids = c.agents.filter((a) => a.enabled !== false && runtimeOf(c, a) === name).map((a) => a.id);
+      const to = fallbackRuntime(name);
+      if (!to) { noteOnce(`nofb:${name}`, `${name} is limited and no other runtime is available — waiting instead`); continue; }
+      const h = getHealth()[to];
+      const fresh = h?.ok && h.checked && Date.now() - Date.parse(h.at) < 30 * 60000;
+      if (!fresh) {
+        setLoop({ status: 'running', reason: `${name} hit its limit — testing ${to} before switching` });
+        const r = await checkRuntime(to);
+        if (!r.ok) { noteOnce(`fbfail:${name}:${to}`, `${name} is limited and ${to} failed its check (${r.message || 'error'}) — waiting instead`); continue; }
+      }
+      setAgentsRuntime(ids, to, { auto: true, by: 'loop' });
+      log(`${name} hit its usage limit — moved ${ids.join(', ')} to ${to} (limit setting: switch${pol.switch_back ? ', they move back when it resets' : ''})`);
+    }
+  }
+  return null;
+}
+
+// Why nothing can start (for the stop reason / dashboard).
+function blockedText(b) {
+  if (!b.roots.length) return 'nothing to do';
+  return b.roots.slice(0, 3).map((r) => {
+    const n = r.waiting.length;
+    const what = r.status === 'pending' ? `${r.id} (pending — answer it, then Retry)` : r.status === 'missing' ? `${r.title} (task does not exist)` : `${r.id} (${r.status})`;
+    return `${n} task${n > 1 ? 's' : ''} wait on ${what}`;
+  }).join('; ');
+}
+const busyElsewhere = () => getTasks().filter((t) => t.status === 'in-progress' && !running.has(t.id) && pidAlive(t.owner_pid)).map((t) => t.id);
+
 async function runSingle() {
   for (const id of argTasks) {
     argTask = id;
@@ -324,8 +394,11 @@ async function runOne() {
       updateTask(t.id, { status: 'pending', pending_reason: `No enabled agent with role "${t.role}"` }, 'loop', `No enabled agent with role "${t.role}".`);
       return 'no agent for role';
     }
+    const stopWhy = await applyLimitPolicy();
+    if (stopWhy && allLimited(t.role)) return stopWhy;
     if (allLimited(t.role)) {
-      setLoop({ status: 'waiting', reason: `every ${t.role} agent is on a runtime that is limited or needs setup` });
+      const names = limitedInUse();
+      setLoop({ status: 'waiting', reason: names.length ? `waiting for usage limit: ${limitWaitText(names)}` : `every ${t.role} agent is on a runtime that needs setup` });
       await sleep(L().poll_ms);
       continue;
     }
@@ -338,10 +411,11 @@ async function runOne() {
 
 const startedAt = Date.now();
 let timeUp = false;
+let stopReason = null;
 async function runBoard() {
   for (;;) {
     if (fs.existsSync(P.stop)) stopping = true;
-    if (stopping) return timeUp ? `time limit (${L().max_run_minutes} min) reached` : 'stopped by operator';
+    if (stopping) return stopReason || (timeUp ? `time limit (${L().max_run_minutes} min) reached` : 'stopped by operator');
     const maxMin = Number(L().max_run_minutes || 0);
     if (maxMin > 0 && !timeUp && Date.now() - startedAt > maxMin * 60000) {
       timeUp = true; stopping = true;
@@ -350,6 +424,8 @@ async function runBoard() {
     }
     const { max_parallel, max_iterations } = L();
     const waitingOnLimit = new Set();
+    const stopWhy = await applyLimitPolicy();
+    if (stopWhy) { stopping = true; stopReason = stopWhy; log(stopWhy); continue; }
 
     for (const t of readyTasks()) {
       if (running.size >= max_parallel || iterations >= max_iterations) break;
@@ -360,9 +436,12 @@ async function runBoard() {
       if (allLimited(t.role)) { waitingOnLimit.add(t.role); continue; }
       dispatch(t);
     }
+    const limitedNames = limitedInUse();
     setLoop({
       status: 'running', iterations, active: [...running.keys()],
-      reason: waitingOnLimit.size && !running.size ? `waiting: ${[...waitingOnLimit].join(', ')} agents are on a runtime that is limited or needs setup` : null,
+      reason: waitingOnLimit.size && !running.size
+        ? (limitedNames.length ? `waiting for usage limit: ${limitWaitText(limitedNames)}` : `waiting: ${[...waitingOnLimit].join(', ')} agents are on a runtime that needs setup`)
+        : null,
     });
 
     if (running.size === 0) {
@@ -370,8 +449,19 @@ async function runBoard() {
       if (ONCE && iterations > 0) return 'single round finished';
       if (open.length === 0) return 'all tasks done';
       if (readyTasks().length === 0) {
-        const pend = open.filter((t) => t.status === 'pending').map((t) => t.id);
-        return pend.length ? `waiting for you on ${pend.join(', ')}` : 'remaining tasks are blocked by dependencies';
+        // Tasks being worked on by a single run (or another process) may unblock the rest: wait for them.
+        const elsewhere = busyElsewhere();
+        if (elsewhere.length) {
+          setLoop({ status: 'running', reason: `waiting for ${elsewhere.join(', ')} to finish (started outside the loop)` });
+          await sleep(L().poll_ms);
+          continue;
+        }
+        const b = boardBlockers();
+        if (b.todo === 0) {
+          const pend = open.filter((t) => t.status === 'pending').map((t) => t.id);
+          return pend.length ? `waiting for you on ${pend.join(', ')}` : 'nothing left to start';
+        }
+        return `nothing can start: ${blockedText(b)}`;
       }
       if (iterations >= max_iterations) return `max_iterations (${max_iterations}) reached`;
     }

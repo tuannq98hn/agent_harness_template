@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
 import {
   ROOT, P, ensureState, loadConfig, mutateConfig, readJson, writeJson, getTasks, getIssues, getAgents, addTask, updateTask,
   addIssue, updateIssue, retryTask, readActivity, listRoles, loadRole, logActivity, mutate, now, pidAlive, runtimeOf,
-  getLimits, clearLimit, getHealth, setHealth, setAgent, createBugTasks, readDoc, bugReportPath, listSkills, syncSkills, roleSkills, chatIndex, mutateChatIndex, newChat, currentChat, chatMessages, appendChat,
+  getLimits, clearLimit, getHealth, setHealth, setAgent, setAgentsRuntime, limitPolicy, boardBlockers, createBugTasks, readDoc, bugReportPath, listSkills, syncSkills, roleSkills, chatIndex, mutateChatIndex, newChat, currentChat, chatMessages, appendChat,
 } from './lib/store.mjs';
-import { runAgent, stopAgent, killTree, checkRuntime, isChecking } from './lib/runner.mjs';
+import { runAgent, stopAgent, killTree, checkRuntime, isChecking, maybeProbeLimits, restoreHomeRuntimes } from './lib/runner.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 ensureState();
@@ -81,6 +81,7 @@ function snapshot() {
       ...st, id: a.id, role: a.role, model: a.model || '', enabled: a.enabled !== false, runtime, description,
       status: a.enabled === false ? 'disabled' : running ? 'running'
         : st.status === 'running' || (st.status === 'limited' && !limits[runtime]) ? 'idle' : st.status || 'idle',
+      home_runtime: a.home_runtime || null,
       skills: (() => { try { return roleSkills(loadRole(a.role).meta); } catch { return []; } })(),
       limited: limits[runtime] || null,
       setup: health[runtime]?.ok === false ? health[runtime] : null,
@@ -96,6 +97,8 @@ function snapshot() {
     tasks: getTasks(), issues: getIssues(), agents, runtimes, limits, jobs: jobs(), loop: loopState(),
     settings: { default_runtime: cfg.default_runtime, loop: cfg.loop || {}, schedule: cfg.schedule || { enabled: false } },
     schedule_state: readSchedState(),
+    limit_policy: limitPolicy(cfg),
+    blockers: boardBlockers(),
     activity: readActivity(150), roles: listRoles(), skills: listSkills(), at: now(),
   };
 }
@@ -173,19 +176,19 @@ function unpause(pred) {
 
 function agentPatch(id, patch) {
   const cfg = loadConfig();
+  if (!cfg.agents.some((x) => x.id === id)) fail(`Unknown agent ${id}`);
   if (patch.runtime && !cfg.runtimes[patch.runtime]) fail(`Unknown runtime "${patch.runtime}"`);
-  return mutateConfig((c) => {
-    const a = c.agents.find((x) => x.id === id);
-    if (!a) fail(`Unknown agent ${id}`);
-    const before = runtimeOf(c, a);
-    if (patch.runtime !== undefined) a.runtime = patch.runtime;
-    if (patch.model !== undefined) { if (patch.model) a.model = patch.model; else delete a.model; }
-    if (patch.runtime && patch.runtime !== before && patch.model === undefined) delete a.model; // models are runtime-specific
-    if (patch.enabled !== undefined) a.enabled = !!patch.enabled;
-    if (patch.runtime && patch.runtime !== before) setTimeout(() => { unpause((x) => x.id === id); autoTest(patch.runtime); }, 0);
-    logActivity('human', `settings: ${id} → ${runtimeOf(c, a)}${a.model ? ` (${a.model})` : ''}${a.enabled === false ? ', disabled' : ''}`);
-    return a;
+  // Runtime first (restores the model this agent last used on that runtime), then the explicit model.
+  const moved = patch.runtime ? setAgentsRuntime([id], patch.runtime, { by: 'human' }) : [];
+  const a = mutateConfig((c) => {
+    const x = c.agents.find((y) => y.id === id);
+    if (patch.model !== undefined) { if (patch.model) x.model = patch.model; else delete x.model; }
+    if (patch.enabled !== undefined) x.enabled = !!patch.enabled;
+    return x;
   });
+  if (moved.length) setTimeout(() => autoTest(patch.runtime), 0);
+  if (patch.model !== undefined || patch.enabled !== undefined) logActivity('human', `settings: ${id} → ${runtimeOf(loadConfig(), a)}${a.model ? ` (${a.model})` : ''}${a.enabled === false ? ', disabled' : ''}`);
+  return a;
 }
 
 // Apply runtime/model to every agent with a role (e.g. all implementers on Sonnet).
@@ -196,17 +199,12 @@ function rolePatch(role, patch) {
   return { updated: ids };
 }
 
-function switchRuntime(from, to, ids) {
+function switchRuntime(from, to, ids, { setDefault = false } = {}) {
   const cfg = loadConfig();
   if (!cfg.runtimes[to]) fail(`Unknown runtime "${to}"`);
-  // One write for all agents: fast, and no half-switched state.
-  const switched = mutateConfig((c) => {
-    const list = c.agents.filter((a) => (ids?.length ? ids.includes(a.id) : runtimeOf(c, a) === from));
-    for (const a of list) { if (runtimeOf(c, a) !== to) delete a.model; a.runtime = to; }
-    return list.map((a) => a.id);
-  });
-  logActivity('human', `switched ${switched.join(', ') || 'no agents'} to ${to}`);
-  unpause((a) => switched.includes(a.id));
+  const list = cfg.agents.filter((a) => (ids?.length ? ids.includes(a.id) : runtimeOf(cfg, a) === from)).map((a) => a.id);
+  const switched = setAgentsRuntime(list, to, { by: 'human' }); // one config write for all of them
+  if (setDefault) mutateConfig((c) => { c.default_runtime = to; });
   const test = autoTest(to);
   return { switched, testing: !!test };
 }
@@ -235,6 +233,14 @@ function settingsPatch(p) {
       if (p.loop.max_run_minutes !== undefined) c.loop.max_run_minutes = clamp(p.loop.max_run_minutes, 0, 24 * 60);
       if (p.loop.idle_timeout_s !== undefined) c.loop.idle_timeout_s = clamp(p.loop.idle_timeout_s, 60, 6 * 3600);
       if (p.loop.turn_timeout_s !== undefined) c.loop.turn_timeout_s = clamp(p.loop.turn_timeout_s, 300, 24 * 3600);
+    }
+    if (p.limits) {
+      const lm = { ...(c.limits || {}) };
+      if (p.limits.on_limit !== undefined) { if (!['wait', 'switch', 'stop'].includes(p.limits.on_limit)) fail('on_limit must be wait, switch or stop'); lm.on_limit = p.limits.on_limit; }
+      if (p.limits.fallback !== undefined) { if (p.limits.fallback !== 'auto' && !c.runtimes[p.limits.fallback]) fail(`Unknown runtime "${p.limits.fallback}"`); lm.fallback = p.limits.fallback; }
+      if (p.limits.switch_back !== undefined) lm.switch_back = !!p.limits.switch_back;
+      if (p.limits.probe_minutes !== undefined) lm.probe_minutes = Math.max(5, Math.min(240, Math.round(Number(p.limits.probe_minutes) || 15)));
+      c.limits = lm;
     }
     if (p.schedule) {
       const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '') ? v : null);
@@ -337,6 +343,15 @@ function spawnLoop(args, logName) {
 function startLoop(by = 'human') {
   const l = loopState();
   if (l.status !== 'stopped' && l.pid && pidAlive(l.pid)) fail('The loop is already running');
+  // Don't start a loop that would stop at once: explain what blocks the board instead.
+  const b = boardBlockers();
+  const outside = getTasks().some((t) => t.status === 'in-progress' && pidAlive(t.owner_pid));
+  if (by === 'human' && !b.ready.length && !outside) {
+    if (!b.todo) fail('Nothing to do: no tasks in Todo. Add a task, or Retry a pending one.');
+    const r = b.roots[0];
+    fail(`Nothing can start: ${b.todo} todo task${b.todo > 1 ? 's' : ''} wait on ${b.roots.map((x) => `${x.id.replace(/^missing:/, '')} (${x.status})`).slice(0, 3).join(', ')}. ` +
+      (r?.status === 'pending' ? `Answer ${r.id} and press Retry, or ▶ Run a task directly.` : 'Run a task directly, or fix its dependencies.'));
+  }
   if (by === 'human') logActivity('human', 'started the loop from the dashboard');
   return { pid: spawnLoop([], 'loop.log') };
 }
@@ -441,6 +456,11 @@ function scheduleTick() {
   }
 }
 setInterval(() => { try { scheduleTick(); } catch (e) { logErr('schedule', e); } }, 20000);
+// Re-check limited runtimes without a known reset time, and move auto-switched agents home.
+setInterval(() => {
+  maybeProbeLimits().catch((e) => logErr('probe', e));
+  try { restoreHomeRuntimes(); } catch (e) { logErr('restore', e); }
+}, 30000);
 setTimeout(() => { try { scheduleTick(); } catch (e) { logErr('schedule', e); } }, 2000);
 
 // ---------- routes ----------
@@ -470,7 +490,7 @@ const server = http.createServer(async (req, res) => {
     if (M === 'POST' && a === 'agents' && b && c === 'stop') return send(res, 200, { stopped: stopAgent(b, 'task') || killTree(getAgents()[b]?.agent_pid) });
     if (M === 'PATCH' && a === 'settings') return send(res, 200, settingsPatch(await body(req)));
     if (M === 'PATCH' && a === 'roles' && b) return send(res, 200, rolePatch(b, await body(req)));
-    if (M === 'POST' && a === 'runtimes' && b === 'switch') { const x = await body(req); return send(res, 200, switchRuntime(x.from, x.to, x.agents)); }
+    if (M === 'POST' && a === 'runtimes' && b === 'switch') { const x = await body(req); return send(res, 200, switchRuntime(x.from, x.to, x.all ? loadConfig().agents.map((y) => y.id) : x.agents, { setDefault: !!x.all })); }
     if (M === 'POST' && a === 'runtimes' && b && c === 'test') {
       if (!loadConfig().runtimes[b]) fail(`Unknown runtime "${b}"`);
       checkRuntime(b).catch((e) => logErr('check', e));

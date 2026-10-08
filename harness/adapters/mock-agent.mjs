@@ -30,8 +30,10 @@ if (fs.existsSync(path.join(ROOT, '.harness', `MOCK_HANG_${rtName}`))) {
 
 // Simulate a plan/usage limit: create .harness/MOCK_LIMIT_<runtime> (e.g. MOCK_LIMIT_mock).
 if (fs.existsSync(path.join(ROOT, '.harness', `MOCK_LIMIT_${process.env.HARNESS_RUNTIME}`))) {
-  console.error('Error: You have hit your usage limit. Try again later.');
-  console.log(JSON.stringify({ type: 'result', result: `Claude AI usage limit reached|${Math.floor(Date.now() / 1000) + 3600}`, is_error: true }));
+  // File content = the exact limit message to print (to mimic different CLI versions).
+  const custom = fs.readFileSync(path.join(ROOT, '.harness', `MOCK_LIMIT_${process.env.HARNESS_RUNTIME}`), 'utf8').trim();
+  console.error(custom || 'Error: You have hit your usage limit. Try again later.');
+  console.log(JSON.stringify({ type: 'result', result: custom || `Claude AI usage limit reached|${Math.floor(Date.now() / 1000) + 3600}`, is_error: true }));
   process.exit(1);
 }
 

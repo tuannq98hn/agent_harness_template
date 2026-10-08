@@ -280,12 +280,18 @@ export function getLimits() {
   return db.runtimes;
 }
 export function setLimit(runtime, info) {
-  mutate(P.limits, (db) => { db.runtimes[runtime] = { ...info, at: now() }; });
-  logActivity('harness', `${runtime} hit a usage limit${info.agent ? ` (seen by ${info.agent})` : ''}: ${String(info.message || '').slice(0, 140)}`);
+  let isNew = false;
+  mutate(P.limits, (db) => {
+    const prev = db.runtimes[runtime];
+    isNew = !prev;
+    // Keep the original "at" so the dashboard asks only once; refresh message/reset time.
+    db.runtimes[runtime] = { ...(prev || {}), ...info, resets_at: info.resets_at || prev?.resets_at || null, at: prev?.at || now(), seen_at: now() };
+  });
+  if (isNew) logActivity('harness', `${runtime} hit a usage limit${info.agent ? ` (seen by ${info.agent})` : ''}: ${String(info.message || '').slice(0, 140)}${info.resets_at ? ` — resets ${info.resets_at}` : ''}`);
 }
 export function clearLimit(runtime, by = 'human') {
   mutate(P.limits, (db) => { delete db.runtimes[runtime]; });
-  logActivity(by, `marked ${runtime} as available again`);
+  logActivity(by, by === 'human' ? `marked ${runtime} as available again` : `${runtime} is available again (check passed)`);
 }
 export const isLimited = (runtime) => !!getLimits()[runtime];
 
@@ -356,7 +362,7 @@ export function getHealth() {
 export function setHealth(runtime, info) {
   const prev = getHealth()[runtime];
   mutate(P.health, (db) => { db.runtimes[runtime] = { ...info, at: now() }; });
-  if (!info.ok && (!prev || prev.ok !== false || prev.message !== info.message)) {
+  if (info.ok === false && (!prev || prev.ok !== false || prev.message !== info.message)) {
     logActivity('harness', `${runtime} cannot run in this project: ${String(info.message || '').slice(0, 160)}`);
   }
   if (info.ok && prev && prev.ok === false) logActivity('harness', `${runtime} works again`);
@@ -475,4 +481,109 @@ export function syncSkills() {
     }
   }
   return { synced, removed };
+}
+
+// ---------- Usage-limit policy ----------
+// wait   (default) pause agents on the limited runtime; resume automatically when it is available again
+// switch move them to another runtime; move them back when the limit resets (switch_back)
+// stop   stop the loop when a limit is hit
+export function limitPolicy(cfg = loadConfig()) {
+  const l = cfg.limits || {};
+  return {
+    on_limit: ['wait', 'switch', 'stop'].includes(l.on_limit) ? l.on_limit : 'wait',
+    fallback: l.fallback || 'auto',
+    switch_back: l.switch_back !== false,
+    probe_minutes: Math.max(5, Number(l.probe_minutes) || 15),
+  };
+}
+
+// Reset time from a CLI limit message. Handles:
+//  "…limit reached|1759830000"            (epoch, older Claude Code)
+//  "resets 3pm" / "resets at 3:30 PM" / "reset at 15:00" / "resets 2am (Asia/Saigon)"
+//  "try again in 2 hours 15 minutes" / "in 1h 23m" / "resets in 45 min" / "in 3 days"
+//  ISO timestamps
+export function parseReset(text, from = new Date()) {
+  if (!text) return null;
+  const epoch = text.match(/\|(\d{10})\b/);
+  if (epoch) return new Date(Number(epoch[1]) * 1000).toISOString();
+  const iso = text.match(/\b(20\d\d-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:?\d\d)?)/);
+  if (iso && !Number.isNaN(Date.parse(iso[1]))) return new Date(iso[1]).toISOString();
+  const rel = text.match(/(?:try again|resets?|available)\s+in\s+((?:\d+\s*(?:d(?:ays?)?|h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?|s(?:ec(?:ond)?s?)?)\b[\s,and]*)+)/i);
+  if (rel) {
+    let ms = 0;
+    for (const [, n, u] of rel[1].matchAll(/(\d+)\s*(d|h|m|s)/gi)) ms += Number(n) * { d: 864e5, h: 36e5, m: 6e4, s: 1e3 }[u.toLowerCase()];
+    if (ms > 0) return new Date(from.getTime() + ms).toISOString();
+  }
+  const at = text.match(/resets?\s+(?:at\s+|on\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
+  if (at && (at[3] || at[2])) {
+    let h = Number(at[1]) % 24;
+    const m = Number(at[2] || 0);
+    if (at[3]) { h = h % 12; if (/pm/i.test(at[3])) h += 12; }
+    const d = new Date(from);
+    d.setHours(h, m, 0, 0);
+    if (d <= from) d.setDate(d.getDate() + 1);
+    return d.toISOString();
+  }
+  return null;
+}
+
+// Move agents to another runtime. Models are remembered per runtime, so switching
+// Claude → Codex → Claude gives each agent its Claude model back.
+// auto=true (limit policy) remembers the agent's home runtime so it can be moved back.
+export function setAgentsRuntime(ids, to, { auto = false, by = 'human' } = {}) {
+  const changed = mutateConfig((c) => {
+    if (!c.runtimes[to]) throw new Error(`Unknown runtime "${to}"`);
+    const out = [];
+    for (const a of c.agents) {
+      if (!ids.includes(a.id)) continue;
+      const from = runtimeOf(c, a);
+      if (from === to) { if (!auto) delete a.home_runtime; continue; }
+      a.model_by_runtime = a.model_by_runtime || {};
+      if (a.model) a.model_by_runtime[from] = a.model; else delete a.model_by_runtime[from];
+      if (a.model_by_runtime[to]) a.model = a.model_by_runtime[to]; else delete a.model;
+      if (!Object.keys(a.model_by_runtime).length) delete a.model_by_runtime;
+      a.runtime = to;
+      if (auto) a.home_runtime = a.home_runtime || from; else delete a.home_runtime;
+      out.push(a.id);
+    }
+    return out;
+  });
+  for (const a of Object.values(getAgents())) {
+    if (changed.includes(a.id) && (a.status === 'limited' || a.status === 'error')) setAgent(a.id, { status: 'idle', last_message: '' });
+  }
+  if (changed.length) logActivity(by, `${auto ? 'auto-' : ''}switched ${changed.join(', ')} to ${to}`);
+  return changed;
+}
+
+// Why can't todo tasks start? Finds the "root" tasks every blocked task is waiting on.
+export function boardBlockers() {
+  const tasks = getTasks();
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const unmet = (t) => (t.depends_on || []).filter((d) => byId.get(d)?.status !== 'done');
+  const memo = new Map();
+  const roots = (t, seen = new Set()) => {
+    if (memo.has(t.id)) return memo.get(t.id);
+    const out = new Set();
+    for (const d of unmet(t)) {
+      const dt = byId.get(d);
+      if (!dt) { out.add(`missing:${d}`); continue; }
+      if (seen.has(d)) continue;
+      if (dt.status === 'todo' && unmet(dt).length) for (const r of roots(dt, new Set([...seen, t.id]))) out.add(r);
+      else out.add(d);
+    }
+    memo.set(t.id, out);
+    return out;
+  };
+  const todo = tasks.filter((t) => t.status === 'todo');
+  const ready = todo.filter((t) => !unmet(t).length).map((t) => t.id);
+  const blockedBy = {};
+  for (const t of todo) {
+    if (!unmet(t).length) continue;
+    for (const r of roots(t)) (blockedBy[r] = blockedBy[r] || []).push(t.id);
+  }
+  const rootList = Object.entries(blockedBy).map(([id, waiting]) => {
+    const t = byId.get(id);
+    return { id, status: t?.status || 'missing', title: t?.title || id.replace(/^missing:/, ''), reason: t?.pending_reason || null, waiting };
+  }).sort((a, b) => b.waiting.length - a.waiting.length);
+  return { ready, todo: todo.length, roots: rootList, in_progress: tasks.filter((t) => t.status === 'in-progress').map((t) => t.id) };
 }

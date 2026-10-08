@@ -61,6 +61,12 @@
       5
     ]
   },
+  "limits": {
+    "on_limit": "wait",
+    "fallback": "auto",
+    "switch_back": true,
+    "probe_minutes": 15
+  },
   "ask": {
     "max_depth": 1,
     "timeout_s": 540,

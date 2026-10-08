@@ -66,6 +66,9 @@ header h1 { font-size: 16px; margin: 0; font-weight: 700; white-space: nowrap; o
 #rail h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--rail-muted); }
 #rail .head button { color: var(--rail-muted); border: 0; background: none; padding: 4px 6px; }
 #rail .head button:hover { color: var(--rail-ink); }
+.allrt { display: flex; align-items: center; gap: 8px; padding: 0 16px 12px; border-bottom: 1px solid var(--rail-line); margin-bottom: 8px; }
+.allrt label { font-size: 12px; color: var(--rail-muted); white-space: nowrap; }
+.allrt select { flex: 1; min-width: 0; background: var(--rail-2); color: var(--rail-ink); border-color: var(--rail-line); padding: 5px 8px; font-size: 13px; }
 #agents { overflow: auto; flex: 1; padding: 0 8px 12px; }
 .agent { display: block; width: 100%; text-align: left; border: 0; border-radius: 8px; background: transparent; color: inherit; padding: 10px 10px 10px 12px; margin-bottom: 2px; position: relative; }
 .agent:hover { background: var(--rail-2); }
@@ -228,7 +231,8 @@ dialog .actions .left { margin-right: auto; display: flex; gap: 8px; flex-wrap: 
 
 <div class="app">
   <aside id="rail" aria-label="Agents">
-    <div class="head"><h2>Agents</h2><button id="railsettings" title="Runtime for all agents">Runtimes…</button></div>
+    <div class="head"><h2>Agents</h2><button id="railsettings" title="Runtimes, models, limits">Settings…</button></div>
+    <div class="allrt"><label for="allruntime">All agents on</label><select id="allruntime" aria-label="Switch every agent to a runtime"></select></div>
     <div id="agents"></div>
   </aside>
 
@@ -309,17 +313,17 @@ const hhmm = (iso) => iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digi
 const rtModels = (name) => S.runtimes.find((r) => r.name === name)?.models || [{ id: '', label: 'Default' }];
 const rtLabel = (name) => S.runtimes.find((r) => r.name === name)?.label || name;
 const limitText = (l) => l?.resets_at ? `resets ${hhmm(l.resets_at)}` : 'until you clear it';
-function toast(text, action) {
+function toast(text, action, ms) {
   const el = $('#toast');
   el.innerHTML = esc(text) + (action ? ` <button>${esc(action.label)}</button>` : '');
   if (action) el.querySelector('button').onclick = action.run;
   el.style.display = 'block';
-  clearTimeout(toast.t); toast.t = setTimeout(() => (el.style.display = 'none'), action ? 8000 : 3500);
+  clearTimeout(toast.t); toast.t = setTimeout(() => (el.style.display = 'none'), ms || (action ? 8000 : 3500));
 }
 async function api(method, url, data) {
   const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(j.error || `Request failed (${r.status})`); throw new Error(j.error); }
+  if (!r.ok) { toast(j.error || `Request failed (${r.status})`, null, 9000); throw new Error(j.error); }
   return j;
 }
 const loopRunning = () => S.loop.status === 'running' || S.loop.status === 'stopping';
@@ -367,13 +371,31 @@ $('#stoploop').onclick = async () => { await api('POST', '/api/loop/stop'); toas
 $('#stopnow').onclick = async () => { await api('POST', '/api/loop/stop', { force: true }); toast('Stopping running agents now'); };
 
 // ================= agent rail =================
+function renderAllRuntime() {
+  const sel = $('#allruntime');
+  if (document.activeElement === sel) return;
+  const used = [...new Set(S.agents.filter((a) => a.enabled).map((a) => a.runtime))];
+  const mixed = used.length !== 1;
+  sel.innerHTML = (mixed ? `<option value="" selected>Mixed (${used.map(rtLabel).join(' + ') || '—'})</option>` : '') +
+    S.runtimes.map((r) => `<option value="${esc(r.name)}" ${!mixed && used[0] === r.name ? 'selected' : ''}>${esc(r.label)}${r.limited ? ' — limit' : r.health?.ok === false ? ' — needs setup' : !r.installed && r.name !== 'mock' ? ' — not found' : ''}</option>`).join('');
+}
+$('#allruntime').onchange = async (e) => {
+  const to = e.target.value;
+  if (!to) return;
+  const r = S.runtimes.find((x) => x.name === to);
+  if (r && !r.installed && r.name !== 'mock' && !confirm(`"${r.cmd}" was not found on this computer's PATH. Switch every agent anyway?`)) { e.target.blur(); renderAllRuntime(); return; }
+  const res = await api('POST', '/api/runtimes/switch', { to, all: true });
+  toast(`All ${res.switched.length ? 'agents' : ''} now run on ${rtLabel(to)}${res.testing ? ` — testing ${rtLabel(to)}` : ''}. Each agent keeps the model it last used there.`);
+  e.target.blur();
+};
 function renderRail() {
+  renderAllRuntime();
   $('#agents').innerHTML = S.agents.map((a) => {
     const cls = a.limited || a.setup ? 'limited' : a.status;
     const line = a.limited || a.setup ? '' : a.status === 'running' ? `<b>${esc(a.current_task || (a.asked_by ? `for ${a.asked_by}` : ''))}</b> ${esc(a.last_message || 'working')}`
       : a.status === 'disabled' ? 'disabled' : esc(a.last_message ? `last: ${a.last_message}` : 'idle');
     return `<button class="agent ${esc(cls)}" data-agent="${esc(a.id)}" aria-label="${esc(a.id)} settings and activity">
-      <div class="l1"><span class="dot ${esc(cls)}"></span><span class="name">${esc(a.id)}</span><span class="rt">${a.limited || a.setup ? '⚠ ' : ''}${esc(rtLabel(a.runtime))}${a.model ? ` · ${esc(a.model)}` : ''}</span></div>
+      <div class="l1"><span class="dot ${esc(cls)}"></span><span class="name">${esc(a.id)}</span><span class="rt" ${a.home_runtime ? `title="Moved from ${esc(rtLabel(a.home_runtime))} because of a usage limit"` : ''}>${a.limited || a.setup ? '⚠ ' : a.home_runtime ? '↪ ' : ''}${esc(rtLabel(a.runtime))}${a.model ? ` · ${esc(a.model)}` : ''}</span></div>
       <div class="l2">${esc(a.role)}${a.last_activity ? ` · ${ago(a.last_activity)} ago` : ''}</div>
       ${line ? `<div class="l3">${line}</div>` : ''}
       ${a.limited ? `<div class="warnline">Paused by usage limit · ${esc(limitText(a.limited))}</div>` : a.setup ? `<div class="warnline">Paused · ${esc(rtLabel(a.runtime))} needs setup</div>` : ''}
@@ -389,9 +411,26 @@ function renderAttention() {
     const affected = S.agents.filter((a) => a.runtime === r.name && a.enabled);
     if (!affected.length) continue; // nobody uses it now; the runtime tag still shows the limit
     const alt = S.runtimes.filter((x) => x.name !== r.name && usable(x) && x.name !== 'mock');
-    parts.push(`<div class="alert limit"><div class="msg"><b>⚠ ${esc(r.label)} hit its usage limit · ${esc(limitText(r.limited))}</b>${affected.length ? `${affected.length} agent${affected.length > 1 ? 's are' : ' is'} paused: ${esc(affected.map((a) => a.id).join(', '))}` : 'No enabled agent uses it right now'}<small>${esc(r.limited.message || '')}</small></div>
+    const pol = S.limit_policy || {};
+    const policyLine = pol.on_limit === 'stop' ? 'Limit setting: stop the loop.'
+      : pol.on_limit === 'switch' ? 'Limit setting: switch — no other runtime was usable, so they wait.'
+      : `Limit setting: wait — the loop continues by itself ${r.limited.resets_at ? `at ${hhmm(r.limited.resets_at)}` : `when a check succeeds (every ${pol.probe_minutes || 15} min${r.limited.last_check ? `, last ${hhmm(r.limited.last_check)}` : ''})`}.`;
+    parts.push(`<div class="alert limit"><div class="msg"><b>⚠ ${esc(r.label)} hit its usage limit · ${esc(limitText(r.limited))}</b>${affected.length} agent${affected.length > 1 ? 's are' : ' is'} paused: ${esc(affected.map((a) => a.id).join(', '))}. ${esc(policyLine)}<small>${esc(r.limited.message || '')}</small></div>
       <div class="acts">${alt.map((x) => `<button class="warn" data-switch="${esc(r.name)}" data-to="${esc(x.name)}">Switch to ${esc(x.label)}</button>`).join('')}
-      <button data-choose="${esc(r.name)}">Choose…</button><button data-clear="${esc(r.name)}">Mark available</button></div></div>`);
+      <button data-choose="${esc(r.name)}">Choose…</button>${r.health?.checking ? '<button disabled>Checking…</button>' : `<button data-test="${esc(r.name)}" title="Run a one-line prompt now; clears the limit if it works">Check now</button>`}<button data-clear="${esc(r.name)}">Mark available</button></div></div>`);
+  }
+  const moved = S.agents.filter((a) => a.home_runtime && a.home_runtime !== a.runtime);
+  if (moved.length) {
+    const homes = [...new Set(moved.map((a) => a.home_runtime))];
+    parts.push(`<div class="alert pend"><div class="msg"><b>Agents moved because of a usage limit</b>${esc(moved.map((a) => `${a.id} → ${rtLabel(a.runtime)}`).join(', '))}. ${S.limit_policy?.switch_back !== false ? `They move back to ${esc(homes.map(rtLabel).join(', '))} when it is available again.` : 'Switch-back is off.'}</div>
+      <div class="acts">${homes.map((h) => `<button data-sendhome="${esc(h)}">Move back to ${esc(rtLabel(h))} now</button>`).join('')}</div></div>`);
+  }
+  const bl = S.blockers;
+  const loopIdle = S.loop.status !== 'running' && S.loop.status !== 'stopping';
+  if (bl && loopIdle && bl.todo && !bl.ready.length && bl.roots.length && !Object.values(S.jobs || {}).some((j) => j.alive)) {
+    const r0 = bl.roots[0];
+    parts.push(`<div class="alert pend"><div class="msg"><b>The loop can't start any task</b>${bl.roots.slice(0, 3).map((r) => `${r.waiting.length} task${r.waiting.length > 1 ? 's' : ''} wait on ${esc(r.id.replace(/^missing:/, ''))} (${esc(r.status)}${r.reason ? `: ${esc(r.reason)}` : ''})`).join(' · ')}<small>Start loop only runs tasks whose dependencies are done. ▶ Run on a card runs one task anyway.</small></div>
+      <div class="acts">${r0.status === 'pending' ? `<button data-open="${esc(r0.id)}">Answer ${esc(r0.id)}</button><button class="go" data-retry="${esc(r0.id)}">↻ Retry ${esc(r0.id)}</button>` : r0.status === 'todo' || r0.status === 'in-progress' ? `<button class="go" data-run="${esc(r0.id)}">▶ Run ${esc(r0.id)}</button>` : ''}</div></div>`);
   }
   for (const r of S.runtimes.filter((x) => x.health?.ok === false && !x.limited)) {
     const affected = S.agents.filter((a) => a.runtime === r.name && a.enabled);
@@ -414,6 +453,11 @@ $('#attention').addEventListener('click', async (e) => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.switch) return switchRuntime(b.dataset.switch, b.dataset.to);
   if (b.dataset.test) return testRuntime(b.dataset.test);
+  if (b.dataset.run) return runTask(b.dataset.run);
+  if (b.dataset.sendhome) {
+    const ids = S.agents.filter((a) => a.home_runtime === b.dataset.sendhome).map((a) => a.id);
+    return switchRuntime(null, b.dataset.sendhome, ids);
+  }
   if (b.dataset.choose) return openSwitchDialog(b.dataset.choose);
   if (b.dataset.clear) { await api('POST', `/api/runtimes/${b.dataset.clear}/clear-limit`); toast(`${rtLabel(b.dataset.clear)} marked available`); }
   if (b.dataset.open) openDetail(b.dataset.open);
@@ -737,7 +781,7 @@ $('#agentdlg').addEventListener('close', () => { openAgent = null; });
 
 // ================= settings dialog =================
 function openSettings() {
-  const st = S.settings || {}; const L = st.loop || {}; const SC = st.schedule || {};
+  const st = S.settings || {}; const L = st.loop || {}; const SC = st.schedule || {}; const LP = S.limit_policy || {};
   $('#settingsbody').innerHTML = `
     <h3>Settings</h3>
     <section><h4>Runtime for agents</h4>
@@ -757,6 +801,19 @@ function openSettings() {
         <label class="check"><input type="checkbox" id="lrev" ${L.review !== false ? 'checked' : ''}> Reviewer agent checks every submitted task</label>
         <label class="check"><input type="checkbox" id="lwt" ${L.use_worktrees ? 'checked' : ''}> Separate git worktree and branch per task (safer with parallel agents)</label>
       </div>
+    </section>
+    <section><h4>When a runtime hits its usage limit</h4>
+      <div style="display:grid;gap:8px">
+        <label class="check"><input type="radio" name="onlimit" value="wait" ${LP.on_limit !== 'switch' && LP.on_limit !== 'stop' ? 'checked' : ''}> <span><b>Wait, then continue</b> — pause its agents and resume automatically when the limit resets</span></label>
+        <label class="check"><input type="radio" name="onlimit" value="switch" ${LP.on_limit === 'switch' ? 'checked' : ''}> <span><b>Switch to another runtime</b> — move its agents, test the other runtime first</span></label>
+        <label class="check"><input type="radio" name="onlimit" value="stop" ${LP.on_limit === 'stop' ? 'checked' : ''}> <span><b>Stop the loop</b> — nothing runs until you start it again</span></label>
+      </div>
+      <div class="grid3" style="margin-top:10px">
+        <label class="f">Switch to<select id="lpfb"><option value="auto">Any working runtime</option>${S.runtimes.filter((r) => r.name !== 'mock').map((r) => `<option value="${esc(r.name)}" ${LP.fallback === r.name ? 'selected' : ''}>${esc(r.label)}</option>`).join('')}</select></label>
+        <label class="check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="lpback" ${LP.switch_back !== false ? 'checked' : ''}> Move back when it resets</label>
+        <label class="f">Re-check every (minutes)<input type="number" min="5" max="240" id="lpprobe" value="${LP.probe_minutes || 15}"></label>
+      </div>
+      <div class="sub" style="margin:6px 0 0">If the CLI says when the limit resets, the harness waits until then; otherwise it runs a one-line check every N minutes. A limit never uses up a task's attempts.</div>
     </section>
     <section><h4>Time</h4>
       <div class="grid3">
@@ -787,6 +844,7 @@ function openSettings() {
     await api('PATCH', '/api/settings', {
       loop: { max_parallel: $('#lpar').value, max_attempts: $('#latt').value, max_iterations: $('#lit').value, gate_command: $('#lgate').value, review: $('#lrev').checked, use_worktrees: $('#lwt').checked,
         max_run_minutes: $('#tmax').value, idle_timeout_s: Number($('#tidle').value) * 60, turn_timeout_s: Number($('#tturn').value) * 60 },
+      limits: { on_limit: (document.querySelector('input[name=onlimit]:checked') || {}).value || 'wait', fallback: $('#lpfb').value, switch_back: $('#lpback').checked, probe_minutes: $('#lpprobe').value },
       schedule: { enabled: $('#scen').checked, start: $('#scstart').value, stop: $('#scstop').value, days: [...document.querySelectorAll('.scday:checked')].map((x) => Number(x.value)) },
     });
     toast('Settings saved — they apply from the next dispatch'); $('#settingsdlg').close();

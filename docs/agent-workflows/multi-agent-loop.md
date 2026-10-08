@@ -68,7 +68,28 @@ creates a tester task "Reproduce I-…" and an implementer task "Fix I-…" that
 reproduce task skips the quality gate (its test is intentionally failing and skipped); the fix task's
 prompt contains the repro report. The issue closes when the fix task is done.
 
+## When the loop can't start anything
+
+**Start loop** only runs tasks whose `depends_on` are all done. If every todo task waits (directly or
+through a chain) on a task that is `pending`, nothing can start: the dashboard says which task blocks
+how many others ("47 tasks wait on T-016 (pending)") and refuses to start an empty loop. Answer the
+blocking task and press **Retry**, or use **▶ Run** on a card, which runs one task regardless of
+dependencies. A loop started while a task is being run separately waits for that run to finish, then
+continues with the tasks it unblocks.
+
 ## Usage limits
+
+Settings → **When a runtime hits its usage limit** (`limits` in `harness.config.json`):
+
+| Option | What happens |
+|---|---|
+| **Wait, then continue** (default, `on_limit: "wait"`) | agents on that runtime pause; the loop keeps running and continues by itself at the reset time, or after a successful re-check every `probe_minutes` (default 15) when the CLI gives no reset time |
+| **Switch to another runtime** (`"switch"`) | the other runtime (`fallback`, or any working one) is tested, then the agents move to it; with `switch_back` they return when the limit is over, and each agent gets back the model it used there |
+| **Stop the loop** (`"stop"`) | the loop stops; start it again yourself |
+
+Reset times are read from messages like "resets 3pm", "resets at 2:30 PM", "try again in 1h 23m" and the
+older "…|<epoch>" form. **Check now** on the banner runs the re-check immediately. The **All agents on**
+selector at the top of the Agents list switches every agent at once (and sets the default runtime).
 
 Claude Code and Codex plans have usage limits. When a run fails with a limit message
 (e.g. "usage limit reached", "rate limit", HTTP 429), the harness:
